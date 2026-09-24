@@ -1,0 +1,26 @@
+cryptomarketmakerkey.pem
+# .NET build and restore files
+[Bb]in/
+[Oo]bj/
+artifacts/
+
+# Rider and other IDE files
+.idea/
+.vs/
+.vscode/
+*.user
+*.suo
+*.userosscache
+
+# Test and build output
+TestResults/
+coverage/
+*.binlog
+*.log
+*.nupkg
+*.snupkg
+
+# Local environment files
+.env
+.env.*
+!.env.example
