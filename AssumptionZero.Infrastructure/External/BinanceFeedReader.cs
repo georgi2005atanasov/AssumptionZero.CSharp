@@ -1,8 +1,6 @@
 using System.Diagnostics;
 using System.Net.WebSockets;
 using System.Threading.Channels;
-using Npgsql;
-using NpgsqlTypes;
 using Org.SbeTool.Sbe.Dll;
 using Spot_stream;
 
@@ -23,10 +21,12 @@ public readonly record struct DepthLevel(
 
 public sealed class BinanceFeedReader
 {
-    private static long binaryMessages = 0;
-    private static string[]? symbols;
+    private long binaryMessages;
+    private readonly string[] symbols;
     private readonly string apiKey;
     private readonly Uri uri;
+    private readonly bool replay;
+    private readonly bool logEvents;
 
     private readonly MessageHeader header = new();
     private readonly DepthDiffStreamEvent depthDecoder = new();
@@ -49,13 +49,16 @@ public sealed class BinanceFeedReader
 
     public event Action<BestQuote>? QuoteReceived;
 
-    public BinanceFeedReader(string apiKey, string[] symbols, string baseUrl)
+    public BinanceFeedReader(string apiKey, string[] symbols, string baseUrl,
+        bool replay = false, bool? logEvents = null)
     {
-        ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        if (!replay) ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
         this.apiKey = apiKey;
-        BinanceFeedReader.symbols = symbols;
-        string streams = FormatStreams(BinanceFeedReader.symbols);
-        uri = new Uri($"{baseUrl}{streams}");
+        this.symbols = symbols;
+        this.replay = replay;
+        this.logEvents = logEvents ?? !replay;
+        string streams = FormatStreams(symbols);
+        uri = new Uri(replay ? baseUrl : $"{baseUrl}{streams}");
     }
 
     public async Task Start(
@@ -63,6 +66,8 @@ public sealed class BinanceFeedReader
         ExecutionMode executionMode = ExecutionMode.SeedData,
         string connectionString = "")
     {
+        if (replay != (executionMode == ExecutionMode.Replay))
+            throw new ArgumentException("Replay connection and execution mode must match.");
         Task? writerTask = null;
 
         if (executionMode == ExecutionMode.SeedData)
@@ -82,7 +87,9 @@ public sealed class BinanceFeedReader
             recordingStartTimestamp = Stopwatch.GetTimestamp();
             await connectedClient.AndStartReceiving(
                 message => ProcessingPipeline(message, executionMode),
-                cancellationToken);
+                cancellationToken,
+                allowNormalClosure: replay,
+                logEvents: logEvents);
         }
         finally
         {
@@ -105,7 +112,7 @@ public sealed class BinanceFeedReader
             var recorded = new RecordedMessage(
                 recordingId,
                 ++recordingSequence,
-                Stopwatch.GetElapsedTime(recordingStartTimestamp, now).Ticks * 100L,
+                NanosecondTime.FromTicks(now - recordingStartTimestamp, Stopwatch.Frequency),
                 (short)message.Type,
                 (byte[])message.Payload.Clone());
 
@@ -124,7 +131,7 @@ public sealed class BinanceFeedReader
     private ClientWebSocket PrepareClient()
     {
         var ws = new ClientWebSocket();
-        ws.Options.SetRequestHeader(
+        if (!replay) ws.Options.SetRequestHeader(
             BinanceConstants.BinanceApiKeyHeaderName,
             apiKey
         );
@@ -237,6 +244,7 @@ public sealed class BinanceFeedReader
 
         // In this SBE message, Symbol follows the repeating groups.
         string symbol = depthDecoder.GetSymbol();
+        if (!logEvents) return;
         Console.WriteLine(
             $"DEPTH {symbol} " +
             $"{depthDecoder.FirstBookUpdateId}" +

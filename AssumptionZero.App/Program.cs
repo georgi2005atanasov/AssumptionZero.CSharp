@@ -8,6 +8,11 @@ string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
 
 string executionMode = Environment.GetEnvironmentVariable("EXECUTION_MODE") ??
                        "SeedData";
+if (!Enum.TryParse(executionMode, ignoreCase: true, out ExecutionMode mode) || !Enum.IsDefined(mode))
+    throw new ArgumentException("EXECUTION_MODE must be SeedData, NormalExecution, or Replay.");
+bool replay = mode == ExecutionMode.Replay;
+string? logSetting = Environment.GetEnvironmentVariable("LOG_EVENTS");
+bool logEvents = logSetting is null ? !replay : bool.Parse(logSetting);
 
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, args) =>
@@ -42,11 +47,16 @@ string[] symbols =
 var binanceFeedReader = new BinanceFeedReader(
     binanceApiKey,
     symbols,
-    baseUrl: "wss://stream-sbe.testnet.binance.vision/stream?streams="
+    baseUrl: replay
+        ? Environment.GetEnvironmentVariable("REPLAY_URL") ?? "ws://127.0.0.1:5080/stream"
+        : "wss://stream-sbe.testnet.binance.vision/stream?streams=",
+    replay: replay,
+    logEvents: logEvents
 );
 
 binanceFeedReader.QuoteReceived += quote =>
 {
+    if (!logEvents) return;
     Console.WriteLine(
         $"QUOTE {quote.Symbol,-12} " +
         $"BID {quote.BidPrice} ({quote.BidQuantity}) | " +
@@ -56,11 +66,10 @@ binanceFeedReader.QuoteReceived += quote =>
 
 try
 {
-    Enum.TryParse(executionMode, out ExecutionMode mode);
     switch (mode)
     {
         case ExecutionMode.SeedData:
-            var pgClient = new NpgsqlClient(connectionString);
+            // var pgClient = new NpgsqlClient(connectionString);
             // var projectDirectory = Directory.GetParent(AppContext.BaseDirectory)!
             //     .Parent!
             //     .Parent!
@@ -73,6 +82,7 @@ try
             await binanceFeedReader.Start(cancellation.Token, mode, connectionString);
             break;
         case ExecutionMode.NormalExecution:
+        case ExecutionMode.Replay:
             await binanceFeedReader.Start(cancellation.Token, mode);
             break;
     }

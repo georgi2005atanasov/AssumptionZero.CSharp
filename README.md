@@ -24,9 +24,9 @@ The signals include order book imbalance, order flow, trade flow, volume, volati
 The system supports two types of input:
 
 - **Binance Spot Testnet SBE stream:** Live depth updates arrive over WebSocket in Simple Binary Encoding (SBE). This gives the system a real external data source and lets it be tested against changing market conditions.
-- **Simulator and replay:** Controlled inputs make tests repeatable. They can also generate rates and bursts that the live testnet may not provide.
+- **Simulator and replay:** The simulator sends a finished recording over a local WebSocket at its recorded rate, including its original bursts and gaps. Synthetic traffic and speed controls are not implemented.
 
-The SBE stream is used because it provides frequent binary market data updates. It does not guarantee enough traffic to test the system's maximum capacity; the simulator is used for that.
+The SBE stream is used because it provides frequent binary market data updates. Replay provides a repeatable input sequence; testing maximum capacity with generated traffic is future work.
 
 Live tests show how the application behaves with a real network connection. Simulator tests are the main basis for repeatable C# versus Rust comparisons.
 
@@ -100,7 +100,7 @@ You need the .NET SDK used by the solution and a Binance Spot Testnet API key fo
 
 1. Visit [Binance Spot Testnet](https://testnet.binance.vision/).
 2. Create an Ed25519 key pair and register its **public** key.
-3. Copy the issued API key into the configuration at the beginning of the application's `Program.cs`.
+3. Set the issued API key in the `BINANCE_APIKEY` environment variable.
 4. Restore and build the solution:
 
    ```bash
@@ -108,15 +108,84 @@ You need the .NET SDK used by the solution and a Binance Spot Testnet API key fo
    dotnet build -c Release
    ```
 
-5. Run the application project:
+5. Run the application project in live processing mode:
 
    ```bash
-   dotnet run --project AssumptionZero.App -c Release
+   EXECUTION_MODE=NormalExecution dotnet run --project AssumptionZero.App -c Release
    ```
 
 The SBE WebSocket connection uses the API key in the `X-MBX-APIKEY` header. It does not need the Ed25519 private key or a request signature. Trading requests, if enabled, have different authentication requirements.
 
 **Do not commit an API key or private key to Git.** If a key has been committed, replace it through Binance Spot Testnet.
+
+## Recording and replay
+
+Commands below run from the solution directory in a shell with the .NET 10 SDK on `PATH`. Use Release builds for measurements.
+
+### Capture a recording
+
+Set `BINANCE_APIKEY` and `PG_CONNECTION` in your local environment. The database must contain the table from `AssumptionZero.App/init.sql`; run that script once for a new database, not against an already initialized table.
+
+```bash
+export PG_CONNECTION='Host=localhost;Database=assumption_zero;Username=postgres;Password=YOUR_LOCAL_PASSWORD'
+EXECUTION_MODE=SeedData dotnet run --project AssumptionZero.App -c Release
+```
+
+Stop with Ctrl+C and wait for the queued database writes to finish before replaying. Each application run creates a new recording ID. Recording stores original binary WebSocket messages, sequence numbers starting at 1, and local receipt offsets in nanoseconds. It does not record text messages, ping/pong frames, or the original WebSocket fragmentation. The timestamp is taken in the recording callback after a complete message has been received and assembled, not at network-card arrival.
+
+New recordings convert the monotonic stopwatch counter directly to nanoseconds. Old recordings remain compatible, but their existing 100 ns rounding cannot be undone. Nanosecond units do not guarantee nanosecond clock resolution or delivery accuracy.
+
+### Select and serve a recording
+
+```bash
+dotnet run --project AssumptionZero.Simulator -c Release -- list
+dotnet run --project AssumptionZero.Simulator -c Release -- replay RECORDING_UUID
+```
+
+`list` shows recording IDs, message counts, total payload bytes, and duration in nanoseconds, including the initial silence. `replay` requires a recording ID and loads the entire recording into memory before listening on `http://127.0.0.1:5080`. The database is not accessed during delivery. Allow additional memory for message objects, deadlines, and timing measurements as well as the payloads. A different listen address can be supplied as a third argument:
+
+```bash
+dotnet run --project AssumptionZero.Simulator -c Release -- replay RECORDING_UUID http://127.0.0.1:5081
+```
+
+Startup rejects empty/missing recordings, sequence gaps, negative or decreasing timestamps, message types other than binary/text, and payloads larger than 1 MB. Equal timestamps are valid. The recorder has no finalized flag: select a capture whose recording process has finished; a still-growing or truncated capture cannot be reliably identified from the existing table alone.
+
+### Connect the application
+
+In another terminal:
+
+```bash
+EXECUTION_MODE=Replay REPLAY_URL=ws://127.0.0.1:5080/stream \
+  dotnet run --project AssumptionZero.App -c Release
+```
+
+Replay mode needs neither Binance credentials nor a database connection in the application. It uses the same receive loop, SBE decoder, and event handlers as live mode. `REPLAY_URL` defaults to the address above. `LOG_EVENTS` accepts `true` or `false`; it defaults to `false` for replay and `true` for live processing. Set `LOG_EVENTS=true` to inspect decoded quotes and depth changes, but leave it off when measuring load.
+
+The simulator accepts `/stream?streams=...` URLs, but always sends the entire loaded recording: query parameters and the application's symbol list do not filter it. It accepts one active client; a concurrent connection receives HTTP 409. Every new connection starts from the beginning at 1× speed, including the original initial delay. After the last message the simulator closes normally and the application exits successfully. The simulator remains ready for another run. Ctrl+C stops the server; a client disconnect interrupts its current replay, including during long gaps.
+
+### Timing and reports
+
+Each message is scheduled against its absolute recorded offset from a fresh monotonic origin after connection setup. The dedicated sender sleeps during long gaps and busy-waits near deadlines; dense recordings may consume a CPU core. Send operations are serialized. If the sender falls behind, it sends every overdue event in order immediately and retains the original deadlines for future events. Catch-up can compress arrival intervals, so inspect the timing report before treating a run as equivalent load.
+
+After each run the simulator prints a JSON report. All timing fields and percentile values are **nanoseconds**:
+
+- `Completed`, `SentMessages`, and `SentBytes` describe completed send operations; an interrupted run is marked incomplete. A completed send is not confirmation that the consumer processed the message.
+- `ExpectedDurationNanoseconds` includes the recording's initial gap. `ActualDurationNanoseconds` measures the timed sender loop through completion of the final send, excluding startup and the close handshake.
+- `SendStartLateness` reports P50, P95, P99, P99.9 (`P999`), and maximum delay beyond each rounded clock deadline.
+- `SendDuration` reports the same statistics for completed WebSocket sends, including time waiting for socket backpressure. Measurements are collected in preallocated arrays and summarized after sending.
+
+Payload bytes, embedded exchange timestamps, message boundaries, and sequence order are preserved. Delivery timing is best effort: OS scheduling, GC, TCP buffering, consumer speed, and shared CPU contention can change actual receipt intervals. This replays recorded market data, not Binance authentication, dynamic subscriptions, auto-culling, or connection-control behavior. It cannot recreate events Binance never delivered to the recorder.
+
+### Tests and loopback measurement
+
+```bash
+dotnet test AssumptionZero.sln -c Release
+dotnet test AssumptionZero.Tests -c Release --filter TestCategory=Timing --logger 'console;verbosity=detailed'
+```
+
+The deterministic tests cover exact scheduling and validation. WebSocket tests cover original bytes, message boundaries/types, repeated runs, concurrent-client rejection, disconnect cancellation, and decoding through live and replay paths. The timing test warms the transport, then sends 1,000 messages spaced 100 microseconds apart. It separately reports server send lateness/duration, client receipt lateness against the same local monotonic clock, and absolute inter-receipt interval error. It has no hardware-dependent nanosecond pass threshold; this loopback fixture is diagnostic, not a throughput benchmark or a substitute for measurements with your real recording and consumer.
+
+To include database integration, set `PG_TEST_CONNECTION` to a test PostgreSQL database before running the tests. The test creates a uniquely named schema, uses the existing table definition and recorder writer, verifies listing/selection/order/validation, and drops only that schema afterward. The account needs permission to create and drop schemas. Without this variable the database test is explicitly skipped.
 
 ## Research boundaries
 

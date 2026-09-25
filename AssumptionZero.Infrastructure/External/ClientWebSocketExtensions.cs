@@ -23,7 +23,9 @@ public static class ClientWebSocketExtensions
     public static async Task<ClientWebSocket> AndStartReceiving(
         this ClientWebSocket ws,
         Action<BinanceFeedReader.WsMessage> makeDecisions,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool allowNormalClosure = false,
+        bool logEvents = true)
     {
         byte[] chunk = new byte[64 * 1024];
 
@@ -35,11 +37,18 @@ public static class ClientWebSocketExtensions
                 chunk,
                 cancellationToken);
             if (message.Type == WebSocketMessageType.Close)
+            {
+                if (allowNormalClosure && ws.CloseStatus == WebSocketCloseStatus.NormalClosure)
+                {
+                    await ws.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Replay received", cancellationToken);
+                    break;
+                }
                 throw new IOException($"Binance closed the connection: {ws.CloseStatus}; {ws.CloseStatusDescription}");
+            }
 
             if (message.Type == WebSocketMessageType.Text)
             {
-                HandleTextMessage(message.Payload);
+                HandleTextMessage(message.Payload, logEvents);
                 continue;
             }
 
@@ -93,11 +102,11 @@ public static class ClientWebSocketExtensions
             stream.ToArray());
     }
 
-    private static void HandleTextMessage(byte[] payload)
+    private static void HandleTextMessage(byte[] payload, bool logEvents)
     {
         string text = Encoding.UTF8.GetString(payload);
 
-        Console.WriteLine($"TEXT: {text}");
+        if (logEvents) Console.WriteLine($"TEXT: {text}");
 
         using var json = JsonDocument.Parse(payload);
 
