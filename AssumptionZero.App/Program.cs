@@ -1,4 +1,13 @@
 ﻿using AssumptionZero.Infrastructure;
+using AssumptionZero.Infrastructure.External;
+
+string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
+                       "my-test-env-key";
+string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
+                          "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
+
+string executionMode = Environment.GetEnvironmentVariable("EXECUTION_MODE") ??
+                       "SeedData";
 
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, args) =>
@@ -7,8 +16,6 @@ Console.CancelKeyPress += (_, args) =>
     cancellation.Cancel();
 };
 
-string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
-                       "my-test-env-key";
 string[] symbols =
 [
     "BTCUSDT", "ETHUSDT", "BNBUSDT", "SOLUSDT", "XRPUSDT",
@@ -18,7 +25,19 @@ string[] symbols =
     "SUIUSDT", "ARBUSDT", "OPUSDT", "INJUSDT", "ICPUSDT",
     "SHIBUSDT", "PEPEUSDT", "WIFUSDT", "RENDERUSDT", "POLUSDT",
     "AAVEUSDT", "FETUSDT", "RUNEUSDT", "SEIUSDT", "TIAUSDT",
-    "ALGOUSDT", "HBARUSDT", "VETUSDT", "JUPUSDT", "0GUSDT"
+    "ALGOUSDT", "HBARUSDT", "VETUSDT", "JUPUSDT", "0GUSDT",
+    "XTZUSDT", "IOTAUSDT", "THETAUSDT", "EGLDUSDT", "KAVAUSDT",
+    "ZECUSDT", "DASHUSDT", "NEOUSDT", "QTUMUSDT", "ZILUSDT",
+    "ONEUSDT", "ROSEUSDT", "MINAUSDT", "KSMUSDT", "LRCUSDT",
+    "SKLUSDT", "STXUSDT", "RSRUSDT", "SSVUSDT", "ARUSDT",
+    "1INCHUSDT", "DYDXUSDT", "TWTUSDT", "CAKEUSDT", "SUPERUSDT",
+    "WOOUSDT", "PEOPLEUSDT", "GRTUSDT", "IMXUSDT", "SANDUSDT",
+    "MANAUSDT", "AXSUSDT", "GALAUSDT", "CHZUSDT", "APEUSDT",
+    "FLOWUSDT", "LDOUSDT", "CRVUSDT", "COMPUSDT", "SUSHIUSDT",
+    "ENAUSDT", "WLDUSDT", "ONDOUSDT", "PENDLEUSDT", "PYTHUSDT",
+    "JTOUSDT", "STRKUSDT", "ZROUSDT", "ZKUSDT", "AEVOUSDT",
+    "ETHFIUSDT", "EIGENUSDT", "TAOUSDT", "BOMEUSDT", "FLOKIUSDT",
+    "BONKUSDT", "TRUMPUSDT", "PAXGUSDT", "ANKRUSDT", "JASMYUSDT"
 ];
 var binanceFeedReader = new BinanceFeedReader(
     binanceApiKey,
@@ -37,7 +56,26 @@ binanceFeedReader.QuoteReceived += quote =>
 
 try
 {
-    await binanceFeedReader.Start(cancellation.Token);
+    Enum.TryParse(executionMode, out ExecutionMode mode);
+    switch (mode)
+    {
+        case ExecutionMode.SeedData:
+            var pgClient = new NpgsqlClient(connectionString);
+            // var projectDirectory = Directory.GetParent(AppContext.BaseDirectory)!
+            //     .Parent!
+            //     .Parent!
+            //     .Parent!
+            //     .FullName;
+            //
+            // var initSqlPath = Path.Combine(projectDirectory, "init.sql");
+            // var initSql = File.ReadAllText(initSqlPath);
+            // await pgClient.ExecuteAsync(initSql);
+            await binanceFeedReader.Start(cancellation.Token, mode, connectionString);
+            break;
+        case ExecutionMode.NormalExecution:
+            await binanceFeedReader.Start(cancellation.Token, mode);
+            break;
+    }
 }
 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
 {

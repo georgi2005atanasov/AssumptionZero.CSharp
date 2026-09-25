@@ -37,7 +37,7 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
             throw new ArgumentException("capacity must be a power of two", nameof(capacity));
 
         buffer = new T[capacity];
-        capacity = (ulong)capacity;
+        this.capacity = (ulong)capacity;
         mask = (ulong)(capacity - 1);
     }
 

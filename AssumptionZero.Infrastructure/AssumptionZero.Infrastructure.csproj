@@ -11,6 +11,7 @@
     </ItemGroup>
 
     <ItemGroup>
+      <PackageReference Include="Npgsql" Version="10.0.3" />
       <PackageReference Include="sbe-tool" Version="1.23.1.1" />
     </ItemGroup>
 

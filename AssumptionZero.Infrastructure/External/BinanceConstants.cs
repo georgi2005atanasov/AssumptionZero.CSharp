@@ -1,4 +1,4 @@
-namespace AssumptionZero.Infrastructure;
+namespace AssumptionZero.Infrastructure.External;
 
 public static class BinanceConstants
 {

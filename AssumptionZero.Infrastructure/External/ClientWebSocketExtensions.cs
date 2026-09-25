@@ -2,7 +2,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
 
-namespace AssumptionZero.Infrastructure;
+namespace AssumptionZero.Infrastructure.External;
 
 public static class ClientWebSocketExtensions
 {

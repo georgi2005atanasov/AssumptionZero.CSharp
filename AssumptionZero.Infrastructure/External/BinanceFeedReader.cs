@@ -1,8 +1,12 @@
+using System.Diagnostics;
 using System.Net.WebSockets;
+using System.Threading.Channels;
+using Npgsql;
+using NpgsqlTypes;
 using Org.SbeTool.Sbe.Dll;
 using Spot_stream;
 
-namespace AssumptionZero.Infrastructure;
+namespace AssumptionZero.Infrastructure.External;
 
 public readonly record struct BestQuote(
     string Symbol,
@@ -31,6 +35,18 @@ public sealed class BinanceFeedReader
     private readonly List<DepthLevel> bidUpdates = new();
     private readonly List<DepthLevel> askUpdates = new();
 
+    private readonly Guid recordingId = Guid.NewGuid();
+    private long recordingStartTimestamp;
+    private long recordingSequence;
+
+    public readonly Channel<RecordedMessage> recordedMessages =
+        Channel.CreateBounded<RecordedMessage>(
+            new BoundedChannelOptions(8192)
+            {
+                SingleReader = true,
+                SingleWriter = true
+            });
+
     public event Action<BestQuote>? QuoteReceived;
 
     public BinanceFeedReader(string apiKey, string[] symbols, string baseUrl)
@@ -43,14 +59,63 @@ public sealed class BinanceFeedReader
     }
 
     public async Task Start(
-        CancellationToken cancellationToken = default)
-        => await (await PrepareClient()
-                .ThenConnect(symbols ?? [], uri, cancellationToken))
-            .AndStartReceiving(Messages, cancellationToken);
+        CancellationToken cancellationToken = default,
+        ExecutionMode executionMode = ExecutionMode.SeedData,
+        string connectionString = "")
+    {
+        Task? writerTask = null;
 
-    private void Messages(WsMessage message)
+        if (executionMode == ExecutionMode.SeedData)
+        {
+            // Starts the background database writer.
+            writerTask = this.PersistRecordedMessagesAsync(connectionString);
+        }
+
+        try
+        {
+            using var ws = PrepareClient();
+
+            var connectedClient = await ws.ThenConnect(
+                symbols ?? [],
+                uri,
+                cancellationToken);
+            recordingStartTimestamp = Stopwatch.GetTimestamp();
+            await connectedClient.AndStartReceiving(
+                message => ProcessingPipeline(message, executionMode),
+                cancellationToken);
+        }
+        finally
+        {
+            if (writerTask is not null)
+            {
+                recordedMessages.Writer.TryComplete();
+                await writerTask;
+            }
+        }
+    }
+
+    private void ProcessingPipeline(WsMessage message, ExecutionMode mode)
     {
         binaryMessages++;
+
+        if (mode == ExecutionMode.SeedData)
+        {
+            long now = Stopwatch.GetTimestamp();
+
+            var recorded = new RecordedMessage(
+                recordingId,
+                ++recordingSequence,
+                Stopwatch.GetElapsedTime(recordingStartTimestamp, now).Ticks * 100L,
+                (short)message.Type,
+                (byte[])message.Payload.Clone());
+
+            if (!recordedMessages.Writer.TryWrite(recorded))
+                throw new InvalidOperationException(
+                    "Recording queue is full. Stop the capture to avoid losing messages.");
+
+            return;
+        }
+
         DecodeSbeMessage(
             message.Payload,
             binaryMessages);
@@ -76,17 +141,14 @@ public sealed class BinanceFeedReader
             Console.WriteLine(
                 $"[{messageNumber}] Invalid SBE message: " +
                 $"{payload.Length} bytes.");
-
             return;
         }
 
         var buffer = new DirectBuffer(payload);
-
         header.Wrap(
             buffer,
             0,
             MessageHeader.SbeSchemaVersion);
-
         if (header.TemplateId == BestBidAskStreamEvent.TemplateId)
         {
             DecodeBestBidAsk(buffer);
@@ -112,28 +174,21 @@ public sealed class BinanceFeedReader
             MessageHeader.Size,
             header.BlockLength,
             header.Version);
-
         sbyte priceExponent = quoteDecoder.PriceExponent;
         sbyte qtyExponent = quoteDecoder.QtyExponent;
-
         decimal bidPrice = DecodeDecimal(
             quoteDecoder.BidPrice,
             priceExponent);
-
         decimal bidQuantity = DecodeDecimal(
             quoteDecoder.BidQty,
             qtyExponent);
-
         decimal askPrice = DecodeDecimal(
             quoteDecoder.AskPrice,
             priceExponent);
-
         decimal askQuantity = DecodeDecimal(
             quoteDecoder.AskQty,
             qtyExponent);
-
         string symbol = quoteDecoder.GetSymbol();
-
         var quote = new BestQuote(
             symbol,
             bidPrice,
@@ -142,7 +197,6 @@ public sealed class BinanceFeedReader
             askQuantity,
             quoteDecoder.BookUpdateId,
             quoteDecoder.EventTime);
-
         // The handler at the top of this file logs the actual prices.
         QuoteReceived?.Invoke(quote);
     }
@@ -156,15 +210,11 @@ public sealed class BinanceFeedReader
             MessageHeader.Size,
             header.BlockLength,
             header.Version);
-
         sbyte priceExponent = depthDecoder.PriceExponent;
         sbyte qtyExponent = depthDecoder.QtyExponent;
-
         bidUpdates.Clear();
         askUpdates.Clear();
-
         var bids = depthDecoder.Bids;
-
         while (bids.HasNext)
         {
             var bid = bids.Next();
@@ -187,14 +237,12 @@ public sealed class BinanceFeedReader
 
         // In this SBE message, Symbol follows the repeating groups.
         string symbol = depthDecoder.GetSymbol();
-
         Console.WriteLine(
             $"DEPTH {symbol} " +
             $"{depthDecoder.FirstBookUpdateId}" +
             $"->{depthDecoder.LastBookUpdateId} " +
             $"bids={bidUpdates.Count} " +
             $"asks={askUpdates.Count}");
-
         foreach (DepthLevel bid in bidUpdates)
         {
             Console.WriteLine(
@@ -226,7 +274,6 @@ public sealed class BinanceFeedReader
         sbyte exponent)
     {
         decimal value = mantissa;
-
         if (exponent > 0)
         {
             for (int i = 0; i < exponent; i++)
@@ -243,5 +290,12 @@ public sealed class BinanceFeedReader
 
     public readonly record struct WsMessage(
         WebSocketMessageType Type,
+        byte[] Payload);
+
+    public readonly record struct RecordedMessage(
+        Guid RecordingId,
+        long SequenceNumber,
+        long ElapsedNanoseconds,
+        short MessageType,
         byte[] Payload);
 }
