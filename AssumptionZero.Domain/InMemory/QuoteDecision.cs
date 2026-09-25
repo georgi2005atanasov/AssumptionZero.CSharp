@@ -1,13 +1,15 @@
 namespace AssumptionZero.Domain.InMemory;
 
-public readonly struct QuoteDecision
+public enum QuoteAction : byte { None, Place, Keep, Replace, Cancel }
+
+public readonly record struct QuoteDecision(
+    long BidPriceTicks,
+    long BidQuantity,
+    QuoteAction BidAction,
+    long AskPriceTicks,
+    long AskQuantity,
+    QuoteAction AskAction)
 {
-    private readonly long BidPriceTicks;
-    public readonly long BidQuantity;
-
-    public readonly long AskPriceTicks;
-    public readonly long AskQuantity;
-
-    public readonly bool QuoteBid;
-    public readonly bool QuoteAsk;
+    public bool QuoteBid => BidQuantity > 0;
+    public bool QuoteAsk => AskQuantity > 0;
 }

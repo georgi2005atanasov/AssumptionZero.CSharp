@@ -23,19 +23,24 @@ public static class ClientWebSocketExtensions
     public static async Task<ClientWebSocket> AndStartReceiving(
         this ClientWebSocket ws,
         Action<BinanceFeedReader.WsMessage> makeDecisions,
+        byte[] receiveBuffer,
         CancellationToken cancellationToken,
         bool allowNormalClosure = false,
         bool logEvents = true)
     {
-        byte[] chunk = new byte[64 * 1024];
-
         while (ws.State == WebSocketState.Open &&
                !cancellationToken.IsCancellationRequested)
         {
-            BinanceFeedReader.WsMessage message = await ReceiveMessage(
-                ws,
-                chunk,
-                cancellationToken);
+            int length = 0;
+            ValueWebSocketReceiveResult result;
+            do
+            {
+                if (length == receiveBuffer.Length)
+                    throw new InvalidDataException("WebSocket message exceeded 1 MB.");
+                result = await ws.ReceiveAsync(receiveBuffer.AsMemory(length), cancellationToken);
+                length += result.Count;
+            } while (!result.EndOfMessage && result.MessageType != WebSocketMessageType.Close);
+            var message = new BinanceFeedReader.WsMessage(result.MessageType, receiveBuffer, length);
             if (message.Type == WebSocketMessageType.Close)
             {
                 if (allowNormalClosure && ws.CloseStatus == WebSocketCloseStatus.NormalClosure)
@@ -48,7 +53,7 @@ public static class ClientWebSocketExtensions
 
             if (message.Type == WebSocketMessageType.Text)
             {
-                HandleTextMessage(message.Payload, logEvents);
+                HandleTextMessage(message.Payload.AsMemory(0, message.Length), logEvents);
                 continue;
             }
 
@@ -61,50 +66,9 @@ public static class ClientWebSocketExtensions
         return ws;
     }
 
-    private static async Task<BinanceFeedReader.WsMessage> ReceiveMessage(
-        ClientWebSocket ws,
-        byte[] chunk,
-        CancellationToken cancellationToken)
+    private static void HandleTextMessage(ReadOnlyMemory<byte> payload, bool logEvents)
     {
-        using var stream = new MemoryStream();
-        WebSocketReceiveResult result;
-
-        do
-        {
-            result = await ws.ReceiveAsync(
-                new ArraySegment<byte>(chunk),
-                cancellationToken);
-
-            if (result.MessageType == WebSocketMessageType.Close)
-            {
-                return new BinanceFeedReader.WsMessage(
-                    WebSocketMessageType.Close,
-                    Array.Empty<byte>());
-            }
-
-            if (result.Count > 0)
-            {
-                stream.Write(
-                    chunk,
-                    0,
-                    result.Count);
-            }
-
-            if (stream.Length > 1024 * 1024)
-            {
-                throw new InvalidDataException(
-                    "WebSocket message exceeded 1 MB.");
-            }
-        } while (!result.EndOfMessage);
-
-        return new BinanceFeedReader.WsMessage(
-            result.MessageType,
-            stream.ToArray());
-    }
-
-    private static void HandleTextMessage(byte[] payload, bool logEvents)
-    {
-        string text = Encoding.UTF8.GetString(payload);
+        string text = Encoding.UTF8.GetString(payload.Span);
 
         if (logEvents) Console.WriteLine($"TEXT: {text}");
 

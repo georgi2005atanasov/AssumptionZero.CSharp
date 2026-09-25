@@ -6,7 +6,7 @@ namespace AssumptionZero.Simulator;
 public static class ReplayServer
 {
     public static WebApplication Create(Recording recording, string url = "http://127.0.0.1:5080",
-        Action<ReplayReport>? reportCompleted = null)
+        Action<ReplayReport>? reportCompleted = null, int fragmentSize = 0)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls(url);
@@ -41,8 +41,7 @@ public static class ReplayServer
                 {
                     report = await Task.Factory.StartNew(
                         () => new ReplayEngine(new StopwatchReplayClock()).Run(recording,
-                            (message, token) => socket.SendAsync(message.Payload.AsMemory(), message.MessageType,
-                                true, token).AsTask().GetAwaiter().GetResult(), session.Token),
+                            (message, token) => SendMessage(socket, message, fragmentSize, token), session.Token),
                         CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                     using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));
@@ -71,6 +70,22 @@ public static class ReplayServer
             }
         });
         return app;
+    }
+
+    private static void SendMessage(WebSocket socket, ReplayMessage message, int fragmentSize, CancellationToken token)
+    {
+        if (fragmentSize <= 0 || message.Payload.Length <= fragmentSize)
+        {
+            socket.SendAsync(message.Payload.AsMemory(), message.MessageType, true, token)
+                .AsTask().GetAwaiter().GetResult();
+            return;
+        }
+        for (int offset = 0; offset < message.Payload.Length; offset += fragmentSize)
+        {
+            int length = Math.Min(fragmentSize, message.Payload.Length - offset);
+            socket.SendAsync(message.Payload.AsMemory(offset, length), message.MessageType,
+                offset + length == message.Payload.Length, token).AsTask().GetAwaiter().GetResult();
+        }
     }
 
     private static async Task WatchClientAsync(WebSocket socket, CancellationTokenSource session)

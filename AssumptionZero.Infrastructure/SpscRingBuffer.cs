@@ -22,18 +22,21 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
     private sealed class PaddedCursor
     {
         // padding so head and tail are very unlikely to share a cache line.
+#pragma warning disable CS0169
         private long p0, p1, p2, p3, p4, p5, p6, p7;
 
         public ulong Value;
         
         private long q0, q1, q2, q3, q4, q5, q6, q7;
+#pragma warning restore CS0169
     }
 
     public SpscRingBuffer(ulong capacity)
     {
-        ArgumentOutOfRangeException.ThrowIfLessThan((long)capacity, 2);
+        if (capacity < 2 || capacity > int.MaxValue)
+            throw new ArgumentOutOfRangeException(nameof(capacity));
 
-        if (!BitOperations.IsPow2((uint)capacity))
+        if (!BitOperations.IsPow2(capacity))
             throw new ArgumentException("capacity must be a power of two", nameof(capacity));
 
         buffer = new T[capacity];
@@ -87,7 +90,7 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
             }
         }
 
-        int index = (int)(head * mask);
+        int index = (int)(head & mask);
 
         item = buffer[index];
 

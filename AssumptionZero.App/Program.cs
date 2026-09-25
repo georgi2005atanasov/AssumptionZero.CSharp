@@ -1,4 +1,7 @@
-﻿using AssumptionZero.Infrastructure;
+﻿using AssumptionZero.App;
+using AssumptionZero.Application.Services;
+using AssumptionZero.Domain.InMemory;
+using AssumptionZero.Infrastructure;
 using AssumptionZero.Infrastructure.External;
 
 string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
@@ -6,13 +9,12 @@ string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
 string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
                           "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
 
-string executionMode = Environment.GetEnvironmentVariable("EXECUTION_MODE") ??
-                       "SeedData";
+string executionMode = "Replay";
 if (!Enum.TryParse(executionMode, ignoreCase: true, out ExecutionMode mode) || !Enum.IsDefined(mode))
     throw new ArgumentException("EXECUTION_MODE must be SeedData, NormalExecution, or Replay.");
 bool replay = mode == ExecutionMode.Replay;
 string? logSetting = Environment.GetEnvironmentVariable("LOG_EVENTS");
-bool logEvents = logSetting is null ? !replay : bool.Parse(logSetting);
+bool logEvents = logSetting is not null && bool.Parse(logSetting);
 
 using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, args) =>
@@ -44,47 +46,90 @@ string[] symbols =
     "ETHFIUSDT", "EIGENUSDT", "TAOUSDT", "BOMEUSDT", "FLOKIUSDT",
     "BONKUSDT", "TRUMPUSDT", "PAXGUSDT", "ANKRUSDT", "JASMYUSDT"
 ];
-var binanceFeedReader = new BinanceFeedReader(
-    binanceApiKey,
-    symbols,
-    baseUrl: replay
-        ? Environment.GetEnvironmentVariable("REPLAY_URL") ?? "ws://127.0.0.1:5080/stream"
-        : "wss://stream-sbe.testnet.binance.vision/stream?streams=",
-    replay: replay,
-    logEvents: logEvents
-);
-
-binanceFeedReader.QuoteReceived += quote =>
-{
-    if (!logEvents) return;
-    Console.WriteLine(
-        $"QUOTE {quote.Symbol,-12} " +
-        $"BID {quote.BidPrice} ({quote.BidQuantity}) | " +
-        $"ASK {quote.AskPrice} ({quote.AskQuantity}) | " +
-        $"UpdateId={quote.UpdateId}");
-};
-
 try
 {
     switch (mode)
     {
         case ExecutionMode.SeedData:
-            // var pgClient = new NpgsqlClient(connectionString);
-            // var projectDirectory = Directory.GetParent(AppContext.BaseDirectory)!
-            //     .Parent!
-            //     .Parent!
-            //     .Parent!
-            //     .FullName;
-            //
-            // var initSqlPath = Path.Combine(projectDirectory, "init.sql");
-            // var initSql = File.ReadAllText(initSqlPath);
-            // await pgClient.ExecuteAsync(initSql);
-            await binanceFeedReader.Start(cancellation.Token, mode, connectionString);
+            var recorder = new BinanceFeedReader(binanceApiKey, symbols,
+                "wss://stream-sbe.testnet.binance.vision/stream?streams=", logEvents: logEvents);
+            await recorder.Start(cancellation.Token, mode, connectionString);
             break;
         case ExecutionMode.NormalExecution:
-        case ExecutionMode.Replay:
-            await binanceFeedReader.Start(cancellation.Token, mode);
+        {
+            if (Environment.GetEnvironmentVariable("BINANCE_APIKEY") is null)
+                throw new InvalidOperationException("BINANCE_APIKEY is required in NormalExecution.");
+            string keyPath = Environment.GetEnvironmentVariable("BINANCE_ED25519_PRIVATE_KEY_PATH") ??
+                throw new InvalidOperationException("BINANCE_ED25519_PRIVATE_KEY_PATH is required in NormalExecution.");
+            using var bootstrap = new BinanceLiveBootstrap(binanceApiKey, keyPath);
+            var instruments = await bootstrap.LoadInstrumentsAsync(symbols, cancellation.Token);
+            string[] assets = instruments.SelectMany(i => new[] { i.BaseAsset, i.QuoteAsset })
+                .Distinct(StringComparer.Ordinal).ToArray();
+            var ledger = new AccountRiskLedger(assets);
+            HotConfig config = new();
+            InstrumentRuntime[] runtimes = instruments.Select(i =>
+                new InstrumentRuntime(i, config, ledger, 0, config.BaseQuantity * 10)).ToArray();
+            await using var accountStream = new BinanceAccountStream(binanceApiKey, bootstrap, ledger, runtimes);
+            await accountStream.StartAsync(cancellation.Token);
+            bool first = true;
+            var feed = new BinanceFeedReader(binanceApiKey, instruments.Select(i => i.Symbol).ToArray(),
+                "wss://stream-sbe.testnet.binance.vision/stream?streams=", logEvents: logEvents,
+                runtimes: runtimes, accountStream: accountStream);
+            while (!cancellation.IsCancellationRequested)
+            {
+                try
+                {
+                    ledger.Invalidate();
+                    await bootstrap.LoadAccountAsync(ledger, runtimes, cancellation.Token, initializeInventory: first);
+                    first = false;
+                    await feed.Start(cancellation.Token, mode,
+                        afterConnect: ct => bootstrap.LoadBooksAsync(runtimes, ct));
+                    break;
+                }
+                catch (IOException exception) when (!cancellation.IsCancellationRequested && !accountStream.Faulted)
+                {
+                    ledger.Invalidate();
+                    foreach (InstrumentRuntime runtime in runtimes) runtime.Invalidate();
+                    Console.Error.WriteLine($"Market feed resynchronizing: {exception.Message}");
+                    await Task.Delay(1_000, cancellation.Token);
+                }
+            }
             break;
+        }
+        case ExecutionMode.Replay:
+        {
+            HotConfig config = new();
+            string fixturePath = Environment.GetEnvironmentVariable("REPLAY_FIXTURE") ??
+                Path.Combine(AppContext.BaseDirectory, "replay-fixture.json");
+            var fixture = ReplayFixture.Load(fixturePath, config);
+            var feed = new BinanceFeedReader("", fixture.Symbols,
+                Environment.GetEnvironmentVariable("REPLAY_URL") ?? "ws://127.0.0.1:5080/stream",
+                replay: true, logEvents: logEvents, runtimes: fixture.Runtimes);
+            int decisions = 0, actionable = 0;
+            feed.DecisionProduced += (_, decision) =>
+            {
+                decisions++;
+                if (decision.BidAction is QuoteAction.Place or QuoteAction.Replace or QuoteAction.Cancel ||
+                    decision.AskAction is QuoteAction.Place or QuoteAction.Replace or QuoteAction.Cancel)
+                    actionable++;
+            };
+            bool measure = Environment.GetEnvironmentVariable("MEASURE_ALLOCATIONS") == "1";
+            int readyDecisions = 0;
+            long allocationStart = 0, allocated = -1;
+            if (measure)
+                feed.DecisionProduced += (runtime, _) =>
+                {
+                    if (!runtime.Ready) return;
+                    readyDecisions++;
+                    if (readyDecisions == 100) allocationStart = GC.GetTotalAllocatedBytes(false);
+                    if (readyDecisions == 200)
+                        allocated = GC.GetTotalAllocatedBytes(false) - allocationStart;
+                };
+            await feed.Start(cancellation.Token, mode);
+            Console.WriteLine($"Replay complete: {decisions} decisions, {actionable} with place/replace/cancel intents.");
+            if (measure) Console.WriteLine($"MARKET_ALLOCATED_BYTES={allocated};READY_DECISIONS={readyDecisions}");
+            break;
+        }
     }
 }
 catch (OperationCanceledException) when (cancellation.IsCancellationRequested)

@@ -16,4 +16,8 @@
       <PackageReference Include="sbe-tool" Version="1.23.1.1" />
     </ItemGroup>
 
+    <ItemGroup>
+      <None Include="replay-fixture.json" CopyToOutputDirectory="PreserveNewest" />
+    </ItemGroup>
+
 </Project>

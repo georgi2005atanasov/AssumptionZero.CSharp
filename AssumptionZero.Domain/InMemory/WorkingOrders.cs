@@ -25,6 +25,7 @@ public struct WorkingOrder
 public enum OrderStatus
 {
     PendingNew,
+    PendingCancel,
     New,
     PartiallyFilled,
     Filled,
