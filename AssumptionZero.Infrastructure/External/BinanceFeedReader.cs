@@ -4,6 +4,7 @@ using System.Net.WebSockets;
 using System.Text;
 using System.Threading.Channels;
 using AssumptionZero.Application.Services;
+using AssumptionZero.Domain.Entities;
 using AssumptionZero.Domain.InMemory;
 using Org.SbeTool.Sbe.Dll;
 using Spot_stream;
@@ -29,6 +30,7 @@ public sealed class BinanceFeedReader
     private readonly string apiKey;
     private readonly Uri uri;
     private readonly bool replay;
+    private readonly bool syntheticReplay;
     private readonly bool logEvents;
 
     private readonly MessageHeader header = new();
@@ -71,12 +73,14 @@ public sealed class BinanceFeedReader
 
     public BinanceFeedReader(string apiKey, string[] symbols, string baseUrl,
         bool replay = false, bool? logEvents = null, InstrumentRuntime[]? runtimes = null,
-        BinanceAccountStream? accountStream = null)
+        BinanceAccountStream? accountStream = null, bool syntheticReplay = false)
     {
         if (!replay) ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        if (syntheticReplay && !replay) throw new ArgumentException("Synthetic books are for replay only.");
         this.apiKey = apiKey;
         this.symbols = symbols;
         this.replay = replay;
+        this.syntheticReplay = syntheticReplay;
         this.logEvents = logEvents ?? !replay;
         this.runtimes = runtimes ?? [];
         this.accountStream = accountStream;
@@ -209,7 +213,7 @@ public sealed class BinanceFeedReader
 
     private void DecodeBestBidAsk(DirectBuffer buffer)
     {
-        if (QuoteReceived is null && !logEvents) return;
+        if (QuoteReceived is null && !logEvents && !syntheticReplay) return;
         quoteDecoder.WrapForDecode(
             buffer,
             MessageHeader.Size,
@@ -229,7 +233,27 @@ public sealed class BinanceFeedReader
         decimal askQuantity = DecodeDecimal(
             quoteDecoder.AskQty,
             qtyExponent);
-        string symbol = quoteDecoder.GetSymbol();
+        if (quoteDecoder.SymbolLength() > 64) return;
+        Span<byte> symbolBytes = stackalloc byte[64];
+        int symbolLength = quoteDecoder.GetSymbol(symbolBytes);
+        if (syntheticReplay)
+        {
+            InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
+            if (runtime is not null && !runtime.OrderBook.IsSynchronized)
+            {
+                Instrument instrument = runtime.Instrument;
+                long bidTicks = instrument.ToPriceTicks(bidPrice);
+                long askTicks = instrument.ToPriceTicks(askPrice);
+                long bidUnits = instrument.ToQuantityUnits(bidQuantity);
+                long askUnits = instrument.ToQuantityUnits(askQuantity);
+                if (instrument.Price(bidTicks) == bidPrice && instrument.Price(askTicks) == askPrice &&
+                    instrument.Quantity(bidUnits) == bidQuantity && instrument.Quantity(askUnits) == askQuantity)
+                    runtime.BootstrapSyntheticBook(bidTicks, bidUnits, askTicks, askUnits,
+                        quoteDecoder.BookUpdateId);
+            }
+        }
+        if (QuoteReceived is null && !logEvents) return;
+        string symbol = Encoding.UTF8.GetString(symbolBytes[..symbolLength]);
         var quote = new BestQuote(
             symbol,
             bidPrice,
@@ -277,6 +301,23 @@ public sealed class BinanceFeedReader
         Span<byte> symbolBytes = stackalloc byte[64];
         int symbolLength = depthDecoder.GetSymbol(symbolBytes);
         InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
+        if (syntheticReplay && runtime is not null && !runtime.OrderBook.IsSynchronized)
+        {
+            for (int i = 0; i < bidCount && !runtime.OrderBook.IsSynchronized; i++)
+            {
+                DepthLevel level = bidChanges[i];
+                if (level.Price > 0 && level.Quantity > 0)
+                    runtime.ObserveSyntheticDepth(true, runtime.Instrument.ToPriceTicks(level.Price),
+                        runtime.Instrument.ToQuantityUnits(level.Quantity), depthDecoder.LastBookUpdateId);
+            }
+            for (int i = 0; i < askCount && !runtime.OrderBook.IsSynchronized; i++)
+            {
+                DepthLevel level = askChanges[i];
+                if (level.Price > 0 && level.Quantity > 0)
+                    runtime.ObserveSyntheticDepth(false, runtime.Instrument.ToPriceTicks(level.Price),
+                        runtime.Instrument.ToQuantityUnits(level.Quantity), depthDecoder.LastBookUpdateId);
+            }
+        }
         bool wasSynchronized = runtime?.OrderBook.IsSynchronized ?? false;
         if (runtime is not null && runtime.BeginDepth(depthDecoder.FirstBookUpdateId, depthDecoder.LastBookUpdateId))
         {

@@ -14,6 +14,9 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private WorkingOrders orders;
     private readonly AccountRiskLedger account;
     private readonly HotConfig config;
+    private readonly bool syntheticReplay;
+    private readonly BookLevel[]? syntheticBids;
+    private readonly BookLevel[]? syntheticAsks;
     private readonly int baseAsset;
     private readonly int quoteAsset;
     private long pendingLastId;
@@ -26,6 +29,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private QuoteAction pendingBidAction, pendingAskAction;
     private OrderStatus priorBidStatus, priorAskStatus;
     private long replacementBidPrice, replacementAskPrice, replacementBidQuantity, replacementAskQuantity;
+    private long observedBidPrice, observedBidQuantity, observedAskPrice, observedAskQuantity;
 
     public Instrument Instrument { get; set; }
     public OrderBook OrderBook { get => book; set => book = value; }
@@ -37,12 +41,21 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public IStrategy Strategy { get; set; }
     public bool Ready => account.Ready && book.IsSynchronized && memory.Warm && !memory.Faulted;
     public HotConfig Config => config;
+    public bool SyntheticReplay => syntheticReplay;
 
     public InstrumentRuntime(Instrument instrument, in HotConfig config, AccountRiskLedger account,
-        long targetQuantity, long maxLongQuantity, long maxShortQuantity = 0, IStrategy? strategy = null)
+        long targetQuantity, long maxLongQuantity, long maxShortQuantity = 0, IStrategy? strategy = null,
+        bool syntheticReplay = false)
     {
         Instrument = instrument;
         this.config = config;
+        this.syntheticReplay = syntheticReplay;
+        if (syntheticReplay)
+        {
+            int syntheticLevels = Math.Max(config.BookLevels, 32);
+            syntheticBids = new BookLevel[syntheticLevels];
+            syntheticAsks = new BookLevel[syntheticLevels];
+        }
         this.account = account;
         baseAsset = account.FindAsset(instrument.BaseAsset);
         quoteAsset = account.FindAsset(instrument.QuoteAsset);
@@ -69,7 +82,10 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public bool BeginDepth(long firstId, long lastId)
     {
         diffOpen = false;
-        if (!book.CanApply(firstId, lastId)) { book.Invalidate(); return false; }
+        bool validSequence = syntheticReplay ?
+            book.IsSynchronized && firstId > 0 && lastId >= firstId :
+            book.CanApply(firstId, lastId);
+        if (!validSequence) { book.Invalidate(); return false; }
         if (lastId <= book.LastUpdateId) return false;
         priorBid = book.Bids[0].PriceTicks;
         priorAsk = book.Asks[0].PriceTicks;
@@ -78,6 +94,40 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         pendingLastId = lastId;
         diffOpen = true;
         return true;
+    }
+
+    /// <summary>Performance replay only: seed bounded depth from an observed top quote.</summary>
+    public bool BootstrapSyntheticBook(long bidPrice, long bidQuantity, long askPrice, long askQuantity,
+        long updateId)
+    {
+        if (!syntheticReplay || book.IsSynchronized || updateId <= 0 || bidPrice <= syntheticBids!.Length ||
+            askPrice <= bidPrice || bidQuantity <= 0 || askQuantity <= 0) return false;
+        for (int i = 0; i < syntheticBids.Length; i++)
+        {
+            syntheticBids[i] = new BookLevel { PriceTicks = bidPrice - i, Quantity = bidQuantity };
+            syntheticAsks![i] = new BookLevel { PriceTicks = askPrice + i, Quantity = askQuantity };
+        }
+        observedBidPrice = bidPrice;
+        observedBidQuantity = bidQuantity;
+        observedAskPrice = askPrice;
+        observedAskQuantity = askQuantity;
+        return LoadSnapshot(syntheticBids, syntheticAsks!, updateId);
+    }
+
+    public bool ObserveSyntheticDepth(bool bid, long price, long quantity, long updateId)
+    {
+        if (!syntheticReplay || book.IsSynchronized || price <= 0 || quantity <= 0) return false;
+        if (bid)
+        {
+            if (price >= observedBidPrice) { observedBidPrice = price; observedBidQuantity = quantity; }
+        }
+        else if (observedAskPrice == 0 || price <= observedAskPrice)
+        {
+            observedAskPrice = price;
+            observedAskQuantity = quantity;
+        }
+        return BootstrapSyntheticBook(observedBidPrice, observedBidQuantity,
+            observedAskPrice, observedAskQuantity, updateId);
     }
 
     public bool ApplyBid(long priceTicks, long quantity)

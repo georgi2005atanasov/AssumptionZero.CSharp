@@ -38,7 +38,8 @@ public class TradingPipelineTests
         return (runtime, ledger);
     }
 
-    private static byte[] Depth(long updateId, long eventTimeMicros, long bidQuantity = 30)
+    private static byte[] Depth(long updateId, long eventTimeMicros, long bidQuantity = 30,
+        string symbol = "BTCUSDT")
     {
         var bytes = new byte[256];
         var encoder = new DepthDiffStreamEvent().WrapForEncodeAndApplyHeader(
@@ -54,11 +55,28 @@ public class TradingPipelineTests
         var ask = encoder.AsksCount(1).Next();
         ask.Price = 102;
         ask.Qty = 10;
-        encoder.SetSymbol("BTCUSDT");
+        encoder.SetSymbol(symbol);
         return bytes[..encoder.Limit];
     }
 
-    private static byte[] Trade(long eventTimeMicros)
+    private static byte[] Quote(string symbol, long updateId)
+    {
+        var bytes = new byte[128];
+        var encoder = new BestBidAskStreamEvent().WrapForEncodeAndApplyHeader(
+            new DirectBuffer(bytes), 0, new MessageHeader());
+        encoder.EventTime = 0;
+        encoder.BookUpdateId = updateId;
+        encoder.PriceExponent = 0;
+        encoder.QtyExponent = 0;
+        encoder.BidPrice = 100;
+        encoder.BidQty = 30;
+        encoder.AskPrice = 102;
+        encoder.AskQty = 10;
+        encoder.SetSymbol(symbol);
+        return bytes[..encoder.Limit];
+    }
+
+    private static byte[] Trade(long eventTimeMicros, string symbol = "BTCUSDT")
     {
         var bytes = new byte[256];
         var encoder = new TradesStreamEvent().WrapForEncodeAndApplyHeader(
@@ -71,7 +89,7 @@ public class TradingPipelineTests
         trade.Price = 101;
         trade.Qty = 5; // 0.5: valid trade flow even though order step is 1.
         trade.IsBuyerMaker = BoolEnum.False;
-        encoder.SetSymbol("BTCUSDT");
+        encoder.SetSymbol(symbol);
         return bytes[..encoder.Limit];
     }
 
@@ -312,6 +330,89 @@ public class TradingPipelineTests
     }
 
     [TestMethod]
+    public void SyntheticReplayCalculatesForTwoProductsWithoutAllocationsAfterWarmup()
+    {
+        HotConfig config = new(bookLevels: 10);
+        var ledger = new AccountRiskLedger(["BTC", "ETH", "USDT"]);
+        ledger.BeginSnapshot(0);
+        ledger.SetBalance(0, 100, 0);
+        ledger.SetBalance(1, 100, 0);
+        ledger.SetBalance(2, 100_000, 0);
+        ledger.CompleteSnapshot();
+        var btc = new InstrumentRuntime(new Instrument(0, "BTCUSDT", "BTC", "USDT",
+            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, syntheticReplay: true);
+        var eth = new InstrumentRuntime(new Instrument(1, "ETHUSDT", "ETH", "USDT",
+            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, syntheticReplay: true);
+        btc.OnBalanceChanged();
+        eth.OnBalanceChanged();
+        var feed = new BinanceFeedReader("", ["BTCUSDT", "ETHUSDT"], "ws://127.0.0.1/stream",
+            replay: true, logEvents: false, runtimes: [btc, eth], syntheticReplay: true);
+        int btcDecisions = 0, ethDecisions = 0;
+        feed.DecisionProduced += (runtime, _) =>
+        {
+            if (ReferenceEquals(runtime, btc)) btcDecisions++;
+            if (ReferenceEquals(runtime, eth)) ethDecisions++;
+        };
+        feed.ProcessBinaryFrame(Quote("BTCUSDT", 40));
+        feed.ProcessBinaryFrame(Quote("ETHUSDT", 40));
+        Assert.IsTrue(btc.OrderBook.IsSynchronized);
+        Assert.IsTrue(eth.OrderBook.IsSynchronized);
+
+        byte[][] btcFrames = Enumerable.Range(0, 300)
+            .Select(i => Depth(41 + i * 2, i * 60_000, symbol: "BTCUSDT")).ToArray();
+        byte[][] ethFrames = Enumerable.Range(0, 300)
+            .Select(i => Depth(42 + i * 2, i * 60_000, symbol: "ETHUSDT")).ToArray();
+        byte[][] btcTrades = Enumerable.Range(100, 200)
+            .Select(i => Trade(i * 60_000, "BTCUSDT")).ToArray();
+        byte[][] ethTrades = Enumerable.Range(100, 200)
+            .Select(i => Trade(i * 60_000, "ETHUSDT")).ToArray();
+        byte[] btcQuote = Quote("BTCUSDT", 40);
+        byte[] ethQuote = Quote("ETHUSDT", 40);
+        for (int i = 0; i < 100; i++)
+        {
+            feed.ProcessBinaryFrame(btcFrames[i]);
+            feed.ProcessBinaryFrame(ethFrames[i]);
+        }
+        Assert.IsTrue(btc.Ready);
+        Assert.IsTrue(eth.Ready);
+        long before = GC.GetAllocatedBytesForCurrentThread();
+        for (int i = 100; i < 300; i++)
+        {
+            feed.ProcessBinaryFrame(btcFrames[i]);
+            feed.ProcessBinaryFrame(btcTrades[i - 100]);
+            feed.ProcessBinaryFrame(btcQuote);
+            feed.ProcessBinaryFrame(ethFrames[i]);
+            feed.ProcessBinaryFrame(ethTrades[i - 100]);
+            feed.ProcessBinaryFrame(ethQuote);
+        }
+        Assert.AreEqual(0L, GC.GetAllocatedBytesForCurrentThread() - before);
+        Assert.AreEqual(500, btcDecisions);
+        Assert.AreEqual(500, ethDecisions);
+        Assert.IsTrue(btc.Signals.TradeFlowImbalance > 0);
+        Assert.IsTrue(eth.Signals.TradeFlowImbalance > 0);
+    }
+
+    [TestMethod]
+    public void SyntheticReplayCanStartFromDepthWhenNoTopQuoteWasRecorded()
+    {
+        var ledger = new AccountRiskLedger(["BTC", "USDT"]);
+        ledger.BeginSnapshot(0);
+        ledger.SetBalance(0, 100, 0);
+        ledger.SetBalance(1, 100_000, 0);
+        ledger.CompleteSnapshot();
+        var runtime = new InstrumentRuntime(Instrument(), new HotConfig(bookLevels: 10),
+            ledger, 100, 10_100, syntheticReplay: true);
+        runtime.OnBalanceChanged();
+        var feed = new BinanceFeedReader("", ["BTCUSDT"], "ws://127.0.0.1/stream",
+            replay: true, logEvents: false, runtimes: [runtime], syntheticReplay: true);
+        feed.ProcessBinaryFrame(Depth(40, 0));
+        Assert.IsTrue(runtime.OrderBook.IsSynchronized);
+        Assert.AreEqual(40L, runtime.OrderBook.LastUpdateId);
+        feed.ProcessBinaryFrame(Depth(42, 1_000));
+        Assert.AreEqual(42L, runtime.OrderBook.LastUpdateId);
+    }
+
+    [TestMethod]
     public async Task FragmentedSocketReplayProducesIdenticalDecisionsOnTwoRuns()
     {
         var recording = new Recording(Guid.NewGuid(), Enumerable.Range(0, 4)
@@ -368,6 +469,53 @@ public class TradingPipelineTests
             string error = await process.StandardError.ReadToEndAsync();
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
             Assert.AreEqual(0, process.ExitCode, error + output);
+            StringAssert.Contains(output, "MARKET_ALLOCATED_BYTES=0;READY_DECISIONS=");
+        }
+    }
+
+    [TestMethod]
+    public async Task FixtureFreeMultiProductSocketReplayHandlesCompleteAndFragmentedMessages()
+    {
+        string directory = AppContext.BaseDirectory;
+        while (!File.Exists(Path.Combine(directory, "AssumptionZero.sln")))
+            directory = Directory.GetParent(directory)?.FullName ?? throw new DirectoryNotFoundException();
+        string app = Path.Combine(directory, "AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll");
+        var messages = new List<ReplayMessage>
+        {
+            new(1, 0, WebSocketMessageType.Binary, Quote("BTCUSDT", 40)),
+            new(2, 0, WebSocketMessageType.Binary, Quote("ETHUSDT", 40))
+        };
+        for (int i = 0; i < 320; i++)
+        {
+            messages.Add(new ReplayMessage(messages.Count + 1, 0, WebSocketMessageType.Binary,
+                Depth(41 + i * 2, i * 60_000, symbol: "BTCUSDT")));
+            messages.Add(new ReplayMessage(messages.Count + 1, 0, WebSocketMessageType.Binary,
+                Depth(42 + i * 2, i * 60_000, symbol: "ETHUSDT")));
+        }
+        var recording = new Recording(Guid.NewGuid(), messages);
+        foreach (int fragmentSize in new[] { 0, 7 })
+        {
+            await using var server = ReplayServer.Create(recording, "http://127.0.0.1:0",
+                reportCompleted: _ => { }, fragmentSize: fragmentSize);
+            await server.StartAsync();
+            string url = server.Urls.Single().Replace("http://", "ws://") + "/stream";
+            using var process = new Process();
+            process.StartInfo.FileName = DotnetExecutable();
+            process.StartInfo.ArgumentList.Add(app);
+            process.StartInfo.Environment["EXECUTION_MODE"] = "Replay";
+            process.StartInfo.Environment["REPLAY_URL"] = url;
+            process.StartInfo.Environment.Remove("REPLAY_FIXTURE");
+            process.StartInfo.Environment["MEASURE_ALLOCATIONS"] = "1";
+            process.StartInfo.RedirectStandardOutput = true;
+            process.StartInfo.RedirectStandardError = true;
+            process.StartInfo.UseShellExecute = false;
+            process.Start();
+            string output = await process.StandardOutput.ReadToEndAsync();
+            string error = await process.StandardError.ReadToEndAsync();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+            Assert.AreEqual(0, process.ExitCode, error + output);
+            StringAssert.Contains(output, "Replay complete: 640 decisions, ");
+            StringAssert.Contains(output, "Products: 2 with a book, 2 ready of 100 configured.");
             StringAssert.Contains(output, "MARKET_ALLOCATED_BYTES=0;READY_DECISIONS=");
         }
     }

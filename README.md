@@ -114,13 +114,14 @@ dotnet run --project AssumptionZero.Simulator -c Release -- replay RECORDING_UUI
 Wait for `Listening on http://127.0.0.1:5080/stream`. In **terminal 2**, connect the trading application:
 
 ```bash
-EXECUTION_MODE=Replay REPLAY_FIXTURE=/absolute/path/to/recording-fixture.json \
-  dotnet run --project AssumptionZero.App -c Release
+EXECUTION_MODE=Replay dotnet run --project AssumptionZero.App -c Release
 ```
 
 Each application connection starts the **entire recording again from its first stored message**; no skip or seek option is needed. The simulator remains running after the application reaches the end. Rerun the terminal 2 command to replay from the beginning again, or press Ctrl+C in terminal 1 to stop the server.
 
-`REPLAY_FIXTURE` is needed for **strategy decisions** from your own recording. It must contain the account, instrument filters, and synchronized book snapshot from the start of that recording; see the format in `AssumptionZero.App/replay-fixture.json`. The bundled fixture matches only the built-in demo, so do not use it for an unrelated capture. Old market-only recordings contain the market messages but do not contain an account snapshot or a complete starting book. The simulator can still stream every recorded message, but the strategy cannot safely quote from those messages alone.
+Without `REPLAY_FIXTURE`, the application creates deterministic account balances and instrument filters for all 100 configured USDT products. Each product gets an invented starting book from its first best-bid-ask message, or from observed depth changes if no best-bid-ask message arrives. Subsequent recorded depth and trades run through the same book, signal, risk, and quote calculations as live processing. The performance replay tolerates depth update-ID gaps because the invented starting book has no true synchronization point. This is a **performance replay**: the account, filters, starting depth, and resulting quote values are synthetic. Products with no usable book data cannot become ready. No orders are submitted or canceled.
+
+For **historically grounded strategy decisions**, set `REPLAY_FIXTURE=/absolute/path/to/recording-fixture.json`. It must contain the actual account, filters, and synchronized book snapshot from the start of the recording; see `AssumptionZero.App/replay-fixture.json` for the format. The bundled BTC fixture matches only the built-in demo. This mode retains strict depth update-ID gap checks. Old market-only recordings do not contain these snapshots, so their quote values cannot be reconstructed accurately from the recording alone.
 
 To make a recording first, follow [Capture a recording](#capture-a-recording) below. The optional database-free `demo` command is separate from recorded replay.
 
@@ -187,12 +188,11 @@ Startup rejects empty/missing recordings, sequence gaps, negative or decreasing 
 In another terminal:
 
 ```bash
-EXECUTION_MODE=Replay REPLAY_FIXTURE=/absolute/path/to/recording-fixture.json \
-  REPLAY_URL=ws://127.0.0.1:5080/stream \
+EXECUTION_MODE=Replay REPLAY_URL=ws://127.0.0.1:5080/stream \
   dotnet run --project AssumptionZero.App -c Release
 ```
 
-Replay mode needs neither Binance credentials nor a database connection in the application. It uses the same receive loop, SBE decoder, and decision handlers as live mode. `REPLAY_URL` defaults to the address above. For a recording, set `REPLAY_FIXTURE` to account and book state matching its start. The fixture must describe the book immediately before the first applicable depth diff; a mismatch fails closed. Existing market-only recordings have no fills. `LOG_EVENTS` defaults to `false`; set it to `true` only for inspecting decoded market data.
+Replay mode needs neither Binance credentials nor a database connection in the application. It uses the same receive loop, SBE decoder, and decision handlers as live mode. `REPLAY_URL` defaults to the address above. Without `REPLAY_FIXTURE`, it runs the all-product performance replay described above. To inspect historically grounded decisions, set `REPLAY_FIXTURE` to matching account and book state; a mismatch fails closed. Existing market-only recordings have no fills. `LOG_EVENTS` defaults to `false`; set it to `true` only for inspecting decoded market data. Set `MEASURE_ALLOCATIONS=1` to print allocated bytes over 100 ready decisions after 100 warm-up decisions; the counter includes other process allocations during that interval, so use the focused tests for the receive-to-decision assertion.
 
 The simulator accepts `/stream?streams=...` URLs, but always sends the entire loaded recording: query parameters and the application's symbol list do not filter it. It accepts one active client; a concurrent connection receives HTTP 409. Every new connection starts from the beginning at 1× speed, including the original initial delay. After the last message the simulator closes normally and the application exits successfully. The simulator remains ready for another run. Ctrl+C stops the server; a client disconnect interrupts its current replay, including during long gaps.
 

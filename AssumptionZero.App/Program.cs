@@ -9,7 +9,7 @@ string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
 string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
                           "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
 
-string executionMode = "Replay";
+string executionMode = Environment.GetEnvironmentVariable("EXECUTION_MODE") ?? "Replay";
 if (!Enum.TryParse(executionMode, ignoreCase: true, out ExecutionMode mode) || !Enum.IsDefined(mode))
     throw new ArgumentException("EXECUTION_MODE must be SeedData, NormalExecution, or Replay.");
 bool replay = mode == ExecutionMode.Replay;
@@ -99,12 +99,16 @@ try
         case ExecutionMode.Replay:
         {
             HotConfig config = new();
-            string fixturePath = Environment.GetEnvironmentVariable("REPLAY_FIXTURE") ??
-                Path.Combine(AppContext.BaseDirectory, "replay-fixture.json");
-            var fixture = ReplayFixture.Load(fixturePath, config);
+            string? fixturePath = Environment.GetEnvironmentVariable("REPLAY_FIXTURE");
+            bool syntheticReplay = string.IsNullOrWhiteSpace(fixturePath);
+            var fixture = syntheticReplay ? BenchmarkReplayFixture.Create(symbols, config) :
+                ReplayFixture.Load(fixturePath!, config);
+            if (syntheticReplay)
+                Console.WriteLine("Performance replay: synthetic account, filters, and initial books; quote values are not historical results.");
             var feed = new BinanceFeedReader("", fixture.Symbols,
                 Environment.GetEnvironmentVariable("REPLAY_URL") ?? "ws://127.0.0.1:5080/stream",
-                replay: true, logEvents: logEvents, runtimes: fixture.Runtimes);
+                replay: true, logEvents: logEvents, runtimes: fixture.Runtimes,
+                syntheticReplay: syntheticReplay);
             int decisions = 0, actionable = 0;
             feed.DecisionProduced += (_, decision) =>
             {
@@ -127,6 +131,9 @@ try
                 };
             await feed.Start(cancellation.Token, mode);
             Console.WriteLine($"Replay complete: {decisions} decisions, {actionable} with place/replace/cancel intents.");
+            Console.WriteLine($"Products: {fixture.Runtimes.Count(runtime => runtime.OrderBook.IsSynchronized)} " +
+                              $"with a book, {fixture.Runtimes.Count(runtime => runtime.Ready)} ready " +
+                              $"of {fixture.Runtimes.Length} configured.");
             if (measure) Console.WriteLine($"MARKET_ALLOCATED_BYTES={allocated};READY_DECISIONS={readyDecisions}");
             break;
         }
