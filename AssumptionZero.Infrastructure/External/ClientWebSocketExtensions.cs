@@ -1,4 +1,5 @@
 using System.Net.WebSockets;
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 
@@ -26,7 +27,8 @@ public static class ClientWebSocketExtensions
         byte[] receiveBuffer,
         CancellationToken cancellationToken,
         bool allowNormalClosure = false,
-        bool logEvents = true)
+        bool logEvents = true,
+        Action<BinanceFeedReader.WsMessage>? nonBinaryFrame = null)
     {
         while (ws.State == WebSocketState.Open &&
                !cancellationToken.IsCancellationRequested)
@@ -40,7 +42,8 @@ public static class ClientWebSocketExtensions
                 result = await ws.ReceiveAsync(receiveBuffer.AsMemory(length), cancellationToken);
                 length += result.Count;
             } while (!result.EndOfMessage && result.MessageType != WebSocketMessageType.Close);
-            var message = new BinanceFeedReader.WsMessage(result.MessageType, receiveBuffer, length);
+            var message = new BinanceFeedReader.WsMessage(result.MessageType, receiveBuffer, length,
+                Stopwatch.GetTimestamp());
             if (message.Type == WebSocketMessageType.Close)
             {
                 if (allowNormalClosure && ws.CloseStatus == WebSocketCloseStatus.NormalClosure)
@@ -53,12 +56,16 @@ public static class ClientWebSocketExtensions
 
             if (message.Type == WebSocketMessageType.Text)
             {
-                HandleTextMessage(message.Payload.AsMemory(0, message.Length), logEvents);
+                try { HandleTextMessage(message.Payload.AsMemory(0, message.Length), logEvents); }
+                finally { nonBinaryFrame?.Invoke(message); }
                 continue;
             }
 
             if (message.Type != WebSocketMessageType.Binary)
+            {
+                nonBinaryFrame?.Invoke(message);
                 continue;
+            }
 
             makeDecisions(message);
         }

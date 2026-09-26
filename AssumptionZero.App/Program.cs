@@ -3,6 +3,7 @@ using AssumptionZero.Application.Services;
 using AssumptionZero.Domain.InMemory;
 using AssumptionZero.Infrastructure;
 using AssumptionZero.Infrastructure.External;
+using AssumptionZero.Infrastructure.Benchmarking;
 
 string binanceApiKey = Environment.GetEnvironmentVariable("BINANCE_APIKEY") ??
                        "my-test-env-key";
@@ -109,6 +110,13 @@ try
                 Environment.GetEnvironmentVariable("REPLAY_URL") ?? "ws://127.0.0.1:5080/stream",
                 replay: true, logEvents: logEvents, runtimes: fixture.Runtimes,
                 syntheticReplay: syntheticReplay);
+            string? benchmarkOutput = Environment.GetEnvironmentVariable("BENCHMARK_OUTPUT");
+            using ReplayBenchmarkRecorder? benchmark = benchmarkOutput is null ? null : new(
+                int.Parse(Environment.GetEnvironmentVariable("BENCHMARK_EXPECTED_FRAMES")
+                    ?? throw new InvalidOperationException("BENCHMARK_EXPECTED_FRAMES is required.")),
+                int.Parse(Environment.GetEnvironmentVariable("BENCHMARK_WARMUP_FRAMES") ?? "0"),
+                Environment.GetEnvironmentVariable("BENCHMARK_DIAGNOSTIC") == "1");
+            feed.Benchmark = benchmark;
             int decisions = 0, actionable = 0;
             feed.DecisionProduced += (_, decision) =>
             {
@@ -129,7 +137,16 @@ try
                     if (readyDecisions == 200)
                         allocated = GC.GetTotalAllocatedBytes(false) - allocationStart;
                 };
-            await feed.Start(cancellation.Token, mode);
+            bool completed = false;
+            try
+            {
+                await feed.Start(cancellation.Token, mode);
+                completed = true;
+            }
+            finally
+            {
+                if (benchmark is not null) benchmark.Finish(completed).Write(benchmarkOutput!);
+            }
             Console.WriteLine($"Replay complete: {decisions} decisions, {actionable} with place/replace/cancel intents.");
             Console.WriteLine($"Products: {fixture.Runtimes.Count(runtime => runtime.OrderBook.IsSynchronized)} " +
                               $"with a book, {fixture.Runtimes.Count(runtime => runtime.Ready)} ready " +

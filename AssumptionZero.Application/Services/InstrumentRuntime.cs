@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using AssumptionZero.Application.Interfaces.Services;
 using AssumptionZero.Domain.Entities;
 using AssumptionZero.Domain.InMemory;
@@ -15,6 +16,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private readonly AccountRiskLedger account;
     private readonly HotConfig config;
     private readonly bool syntheticReplay;
+    private bool syntheticPrecisionInitialized;
     private readonly BookLevel[]? syntheticBids;
     private readonly BookLevel[]? syntheticAsks;
     private readonly int baseAsset;
@@ -41,6 +43,9 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public IStrategy Strategy { get; set; }
     public bool Ready => account.Ready && book.IsSynchronized && memory.Warm && !memory.Faulted;
     public HotConfig Config => config;
+    public bool BenchmarkStages { get; set; }
+    public long LastSignalTicks { get; private set; }
+    public long LastQuoteTicks { get; private set; }
     public bool SyntheticReplay => syntheticReplay;
 
     public InstrumentRuntime(Instrument instrument, in HotConfig config, AccountRiskLedger account,
@@ -77,6 +82,38 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         lastEventNs = 0;
         return book.LoadSnapshot(bids, asks, updateId) &&
                book.BidCount >= config.BookLevels && book.AskCount >= config.BookLevels;
+    }
+
+    /// <summary>Choose synthetic units from this symbol's first observed SBE scales.</summary>
+    public void SetSyntheticPrecision(sbyte priceExponent, sbyte quantityExponent)
+    {
+        if (!syntheticReplay || syntheticPrecisionInitialized) return;
+        decimal tick = DecimalPowerOfTen(priceExponent);
+        decimal step = DecimalPowerOfTen(quantityExponent);
+        Instrument original = Instrument;
+        var scaled = new Instrument(original.Id, original.Symbol, original.BaseAsset, original.QuoteAsset,
+            tick, step, step, original.MaxQuantity, original.MinNotional,
+            original.MinPrice, original.MaxPrice);
+        long target = scaled.ToQuantityUnits(100m);
+        long maxLong = checked(target + config.BaseQuantity * 10);
+        Instrument = scaled;
+        inventory.TargetQuantity = target;
+        inventory.MaxLongQuantity = maxLong;
+        inventory.MaxShortQuantity = 0;
+        OnBalanceChanged();
+        syntheticPrecisionInitialized = true;
+    }
+
+    private static decimal DecimalPowerOfTen(sbyte exponent)
+    {
+        if (exponent is < -28 or > 28)
+            throw new InvalidDataException($"Unsupported SBE exponent {exponent} for synthetic replay.");
+        decimal value = 1m;
+        if (exponent < 0)
+            for (int i = 0; i < -exponent; i++) value /= 10m;
+        else
+            for (int i = 0; i < exponent; i++) value *= 10m;
+        return value;
     }
 
     public bool BeginDepth(long firstId, long lastId)
@@ -144,8 +181,10 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
 
     public QuoteDecision EndDepth(long eventTimeNs)
     {
+        long stageStart = BenchmarkStages ? Stopwatch.GetTimestamp() : 0;
         if (!diffOpen || !book.CompleteDiff(pendingLastId, config.BookLevels))
         {
+            LastSignalTicks = LastQuoteTicks = 0;
             Invalidate();
             return InvalidDecision();
         }
@@ -158,16 +197,31 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             book.Asks[0].PriceTicks > priorAsk ? priorAskQuantity : priorAskQuantity - book.Asks[0].Quantity;
         memory.AddOfi(bidOfi + askOfi);
         adverseScore = memory.UpdateBook(time, book, config, ref signals);
-        return Evaluate();
+        long quoteStart = BenchmarkStages ? Stopwatch.GetTimestamp() : 0;
+        QuoteDecision decision = Evaluate();
+        if (BenchmarkStages)
+        {
+            LastSignalTicks = quoteStart - stageStart;
+            LastQuoteTicks = Stopwatch.GetTimestamp() - quoteStart;
+        }
+        return decision;
     }
 
     public QuoteDecision OnMarketTrade(long eventTimeNs, double quantity, bool aggressiveBuy)
     {
+        long stageStart = BenchmarkStages ? Stopwatch.GetTimestamp() : 0;
         long time = Math.Max(lastEventNs, eventTimeNs);
         lastEventNs = time;
         memory.AddTrade(time, quantity, aggressiveBuy, config);
         memory.UpdateTradeFlow(time, config, ref signals);
-        return Evaluate();
+        long quoteStart = BenchmarkStages ? Stopwatch.GetTimestamp() : 0;
+        QuoteDecision decision = Evaluate();
+        if (BenchmarkStages)
+        {
+            LastSignalTicks = quoteStart - stageStart;
+            LastQuoteTicks = Stopwatch.GetTimestamp() - quoteStart;
+        }
+        return decision;
     }
 
     public void OnBalanceChanged(int changedAsset = -1)

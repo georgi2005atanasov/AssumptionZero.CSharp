@@ -45,7 +45,7 @@ Latency will be recorded for the complete processing path and for its main stage
 | End-to-end processing | Message available to completed decision |
 | Queue delay | Event queued to event picked up by the consumer |
 
-Reports will include **P50, P95, P99, P99.9, and maximum latency**, together with the sample count. Tail latency matters because a system can have a good average while occasionally responding much more slowly.
+Reports will include **P50, P90, P95, P99, P99.9, and maximum latency**, together with the sample count. Tail latency matters because a system can have a good average while occasionally responding much more slowly.
 
 When order submission is tested, local decision time, request preparation, network time, and exchange acknowledgement time will be reported separately. Exchange and network delays will not be presented as language runtime performance.
 
@@ -94,9 +94,32 @@ The project will compare both **latency** and **correctness**. An optimization t
 
 Live Binance measurements will be reported separately from controlled simulator results. Live traffic depends on the exchange, network, and time of day, so it cannot provide identical conditions for both languages.
 
+### Repeatable C# benchmark reports
+
+Build the whole solution in Release, then run the benchmark from the solution directory. A market-data recording can be measured without a fixture: the app uses synthetic account and starting book state while running the same processing and quote calculations. It selects each symbol's synthetic price and quantity units from its first recorded quote or depth frame. The resulting quote values are synthetic, so they cannot establish historical strategy correctness. The built-in `demo` is only a smoke test: its 120 messages are too few for a capacity verdict.
+
+```bash
+export PATH="$HOME/.dotnet:$PATH"
+dotnet build AssumptionZero.sln -c Release -m:1
+dotnet AssumptionZero.Simulator/bin/Release/net10.0/AssumptionZero.Simulator.dll benchmark run \
+  --recording RECORDING_UUID \
+  --speed 1 --p99-limit-us 1000 --replay-p99-lateness-us 100 \
+  --out /absolute/path/to/benchmark-results
+```
+
+The two limits above are examples, **not** recommended service targets. Choose them before running the experiment. Add `--fixture /absolute/path/to/matching-fixture.json` only when you need historically grounded quote decisions. `benchmark sweep` uses the same required options plus `--max-speed 16` (default 16). It measures 1×, doubles until failure or the maximum, then narrows a pass/fail boundary to about 10%. Every speed gets one uninstrumented process-wall baseline and five instrumented Release runs, so a single-speed 1× benchmark takes at least six times the recording's duration. The benchmark excludes the first 10% of frames as warm-up. A speed passes only if all five runs have identical decision hashes, complete frame delivery, acceptable simulator P99 send lateness, at least 30 measured seconds and 10,000 measured frames, and P99 send-to-decision and send-to-frame-completion times within the chosen limit. In fixture-free runs, the decision hash checks repeatability of synthetic calculations. A short or limited recording yields a failed capacity verdict rather than an invented maximum.
+
+Results are saved in `comparison.json` and per-speed directories. Each run has a small versioned `run-N-summary.json`, a `run-N-samples.csv` with every frame, a `run-N-gc-pauses.json`, and application output/error files. CSV timestamps and stage durations are monotonic stopwatch ticks; use `ClockFrequency` in the summary to convert to nanoseconds. The summary reports P50, P90, P95, P99, P99.9, maximum, and sample count for processing stages, client receive-to-decision, simulator send-to-decision, and simulator send-to-frame-completion. A frame with no decision still appears in frame-processing and throughput counts. A trade frame with multiple decisions records the last decision timestamp and the number of decisions.
+
+Application CPU time, average CPU cores used, CPU nanoseconds per measured frame, current and peak resident bytes, managed heap bytes, managed allocated bytes, allocation bytes per frame, Gen 0/1/2 counts, and cumulative GC pause time are reported separately from the simulator. Linux `perf` hardware counters cover the **whole application process**, including startup and warm-up, and are labelled with that scope. They are `null` with a reason when unavailable; on this host `perf_event_paranoid=4` blocks them. The process-wall measurement overhead estimate compares the five measured runs with one uninstrumented run at the same speed. It includes hardware-counter collection when available and is diagnostic because startup and replay scheduling contribute to wall time.
+
+For individual GC pauses, add `--diagnostic`. This enables runtime GC events and marks frames whose processing interval overlaps a pause. Diagnostic runs are labelled separately and do not produce a capacity verdict because event tracing can change latency. To compare with Rust later, emit the same versioned summary fields and frame-sample columns, run on the same host with the same recording and fixture, and distinguish C# managed allocations from Rust allocator allocations. No exchange/network delay is included in the receive-to-decision language-path metric; send-to-decision deliberately includes local WebSocket buffering and receiver backlog.
+
+The exact report fields, units, sample columns, and decision hash are defined in [Benchmark report format](docs/benchmark-schema.md).
+
 ## Replay your recorded messages from the beginning
 
-Run these commands from the solution directory with the .NET 10 SDK installed. On this workspace, if `dotnet` is not on your shell's `PATH`, run `export PATH="$HOME/.dotnet:$PATH"` in each terminal first. The simulator reads a **completed recording** from PostgreSQL and sends every stored WebSocket message in sequence, starting with sequence number 1. It respects the recording's initial delay and original message timing.
+Run these commands from the solution directory with the .NET 10 SDK installed. On this workspace, run `export PATH="$HOME/.dotnet:$PATH"` in each terminal first; `/usr/bin/dotnet` points to an incomplete system installation. The simulator reads a **completed recording** from PostgreSQL and sends every stored WebSocket message in sequence, starting with sequence number 1. It respects the recording's initial delay and original message timing.
 
 First, set the same database connection string used while capturing the recording, then list its recording IDs:
 

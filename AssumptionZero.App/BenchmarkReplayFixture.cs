@@ -7,7 +7,8 @@ namespace AssumptionZero.App;
 /// <summary>Deterministic, invented account and filters for market-only performance recordings.</summary>
 internal static class BenchmarkReplayFixture
 {
-    private const decimal Grid = 0.000000000001m;
+    // Placeholder units; the first SBE quote/depth for each symbol supplies its own exponents.
+    private const decimal Grid = 1m;
 
     public static (string[] Symbols, InstrumentRuntime[] Runtimes) Create(
         string[] symbols, in HotConfig config)

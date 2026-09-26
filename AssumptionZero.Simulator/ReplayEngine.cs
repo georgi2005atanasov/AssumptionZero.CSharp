@@ -41,15 +41,15 @@ public sealed class StopwatchReplayClock : IReplayClock
     }
 }
 
-public sealed record TimingStatistics(long P50, long P95, long P99, long P999, long Maximum)
+public sealed record TimingStatistics(long P50, long P90, long P95, long P99, long P999, long Maximum)
 {
     public static TimingStatistics Calculate(long[] values, int count)
     {
-        if (count == 0) return new(0, 0, 0, 0, 0);
+        if (count == 0) return new(0, 0, 0, 0, 0, 0);
         var sorted = values.AsSpan(0, count).ToArray();
         Array.Sort(sorted);
         long Percentile(double fraction) => sorted[(int)Math.Ceiling(count * fraction) - 1];
-        return new(Percentile(.5), Percentile(.95), Percentile(.99), Percentile(.999), sorted[^1]);
+        return new(Percentile(.5), Percentile(.9), Percentile(.95), Percentile(.99), Percentile(.999), sorted[^1]);
     }
 }
 
@@ -57,20 +57,28 @@ public sealed record ReplayReport(Guid RecordingId, bool Completed, int SentMess
     long ExpectedDurationNanoseconds, long ActualDurationNanoseconds,
     TimingStatistics SendStartLateness, TimingStatistics SendDuration, string? Error,
     // Local clock origin is exposed for in-process diagnostics, not as a portable timestamp in reports.
-    [property: JsonIgnore] long OriginTimestamp);
+    [property: JsonIgnore] long OriginTimestamp)
+{
+    [JsonIgnore] public long[] SendStartTicks { get; init; } = [];
+    public double Speed { get; init; } = 1;
+}
 
 public sealed class ReplayEngine(IReplayClock clock)
 {
     // The caller runs this synchronous loop on a dedicated thread. A send must complete before the next one.
     public ReplayReport Run(Recording recording, Action<ReplayMessage, CancellationToken> send,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, double speed = 1)
     {
+        if (!double.IsFinite(speed) || speed <= 0 || speed > 1_000)
+            throw new ArgumentOutOfRangeException(nameof(speed));
         int count = recording.Messages.Count;
         var deadlines = new long[count];
         var lateness = new long[count];
         var durations = new long[count];
+        var sendStarts = new long[count];
         for (int i = 0; i < count; i++)
-            deadlines[i] = NanosecondTime.ToTicksCeiling(recording.Messages[i].ElapsedNanoseconds, clock.Frequency);
+            deadlines[i] = NanosecondTime.ToTicksCeiling(
+                checked((long)Math.Ceiling(recording.Messages[i].ElapsedNanoseconds / (decimal)speed)), clock.Frequency);
 
         int sent = 0;
         long bytes = 0;
@@ -83,6 +91,7 @@ public sealed class ReplayEngine(IReplayClock clock)
                 clock.WaitUntil(origin, deadlines[i], cancellationToken);
                 cancellationToken.ThrowIfCancellationRequested();
                 long start = clock.GetTimestamp();
+                sendStarts[i] = start;
                 send(recording.Messages[i], cancellationToken);
                 long end = clock.GetTimestamp();
                 lateness[i] = NanosecondTime.FromTicks(Math.Max(0, start - origin - deadlines[i]), clock.Frequency);
@@ -96,7 +105,9 @@ public sealed class ReplayEngine(IReplayClock clock)
             error = exception.Message;
         }
         long elapsed = NanosecondTime.FromTicks(clock.GetTimestamp() - origin, clock.Frequency);
-        return new(recording.Id, sent == count, sent, bytes, recording.DurationNanoseconds, elapsed,
-            TimingStatistics.Calculate(lateness, sent), TimingStatistics.Calculate(durations, sent), error, origin);
+        return new(recording.Id, sent == count, sent, bytes,
+            checked((long)Math.Ceiling(recording.DurationNanoseconds / (decimal)speed)), elapsed,
+            TimingStatistics.Calculate(lateness, sent), TimingStatistics.Calculate(durations, sent), error, origin)
+        { SendStartTicks = sendStarts, Speed = speed };
     }
 }

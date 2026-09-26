@@ -1,5 +1,6 @@
 using System.Net.WebSockets;
 using AssumptionZero.Infrastructure;
+using AssumptionZero.Infrastructure.Benchmarking;
 using AssumptionZero.Simulator;
 using Microsoft.VisualStudio.TestTools.UnitTesting;
 
@@ -78,6 +79,23 @@ public class ReplayEngineTests
         var actual = new List<long>();
         new ReplayEngine(clock).Run(Capture(1, 100, 101), (_, _) => actual.Add(clock.Now - origin));
         CollectionAssert.AreEqual(new long[] { 1, 1, 2 }, actual);
+    }
+
+    [TestMethod]
+    public void ScaledReplayUsesAbsoluteDeadlinesAndReportsP90()
+    {
+        var clock = new FakeClock();
+        long origin = clock.Now;
+        var starts = new List<long>();
+        ReplayReport report = new ReplayEngine(clock).Run(Capture(0, 20, 20, 80, 200),
+            (_, _) => starts.Add(clock.Now - origin), speed: 2);
+        CollectionAssert.AreEqual(new long[] { 0, 10, 10, 40, 100 }, starts);
+        Assert.AreEqual(100L, report.ExpectedDurationNanoseconds);
+        Assert.AreEqual(2.0, report.Speed);
+        Assert.AreEqual(5, report.SendStartTicks.Length);
+        var stats = LatencySummary.From([1, 5, 2, 4, 3], 5);
+        Assert.AreEqual(5L, stats.P90);
+        Assert.AreEqual(5L, stats.P99);
     }
 
     [TestMethod]

@@ -7,7 +7,11 @@ if (args.Length == 0 || args[0] is "--help" or "-h")
                         AssumptionZero.Simulator demo [http://127.0.0.1:5080]
                         AssumptionZero.Simulator list
                         AssumptionZero.Simulator replay <recording-id> [http://127.0.0.1:5080]
-                      demo needs no database. Set PG_CONNECTION for list and replay.
+                        AssumptionZero.Simulator benchmark run|sweep --recording UUID|demo --out DIR
+                          --p99-limit-us N --replay-p99-lateness-us N [--fixture PATH]
+                          [--speed N|--max-speed N] [--diagnostic]
+                      demo needs no database. Set PG_CONNECTION for list, replay, and recorded benchmarks.
+                      Benchmarks without --fixture use synthetic account, filters, and starting books.
                       Replay sends the entire recording at 1x over /stream; stream query parameters are ignored.
                       """);
     return args.Length == 0 ? 1 : 0;
@@ -22,6 +26,7 @@ Console.CancelKeyPress += (_, eventArgs) =>
 
 try
 {
+    if (args[0] == "benchmark") return await BenchmarkRunner.RunAsync(args[1..]);
     bool list = args is ["list"];
     bool demo = args is ["demo"] or ["demo", _];
     bool replay = args.Length is 2 or 3 && args[0] == "replay" && Guid.TryParse(args[1], out _);

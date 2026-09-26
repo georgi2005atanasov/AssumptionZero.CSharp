@@ -6,6 +6,7 @@ using System.Threading.Channels;
 using AssumptionZero.Application.Services;
 using AssumptionZero.Domain.Entities;
 using AssumptionZero.Domain.InMemory;
+using AssumptionZero.Infrastructure.Benchmarking;
 using Org.SbeTool.Sbe.Dll;
 using Spot_stream;
 
@@ -61,6 +62,7 @@ public sealed class BinanceFeedReader
 
     public event Action<BestQuote>? QuoteReceived;
     public event Action<InstrumentRuntime, QuoteDecision>? DecisionProduced;
+    public ReplayBenchmarkRecorder? Benchmark { get; set; }
 
     /// <summary>Runs the same decoder used by the WebSocket receive loop; useful for deterministic replay checks.</summary>
     public void ProcessBinaryFrame(ReadOnlySpan<byte> frame)
@@ -100,6 +102,8 @@ public sealed class BinanceFeedReader
     {
         if (replay != (executionMode == ExecutionMode.Replay))
             throw new ArgumentException("Replay connection and execution mode must match.");
+        if (Benchmark is not null && executionMode != ExecutionMode.Replay)
+            throw new ArgumentException("Benchmark recording requires replay mode.");
         Task? writerTask = null;
 
         if (executionMode == ExecutionMode.SeedData)
@@ -117,13 +121,20 @@ public sealed class BinanceFeedReader
                 uri,
                 cancellationToken);
             if (afterConnect is not null) await afterConnect(cancellationToken);
+            if (Benchmark is not null)
+                foreach (InstrumentRuntime runtime in runtimes) runtime.BenchmarkStages = true;
             recordingStartTimestamp = Stopwatch.GetTimestamp();
             await connectedClient.AndStartReceiving(
                 message => ProcessingPipeline(message, executionMode),
                 receiveBuffer,
                 cancellationToken,
                 allowNormalClosure: replay,
-                logEvents: logEvents);
+                logEvents: logEvents,
+                nonBinaryFrame: Benchmark is null ? null : message =>
+                {
+                    Benchmark.BeginFrame(message.Type, message.Length, message.ReceivedTimestamp);
+                    Benchmark.EndFrame();
+                });
         }
         finally
         {
@@ -137,28 +148,33 @@ public sealed class BinanceFeedReader
 
     private void ProcessingPipeline(WsMessage message, ExecutionMode mode)
     {
-        accountStream?.Drain();
-        if (accountStream?.Faulted == true)
-            throw new IOException("User-data stream lost account reconciliation.");
-        if (mode == ExecutionMode.SeedData)
+        Benchmark?.BeginFrame(message.Type, message.Length, message.ReceivedTimestamp);
+        try
         {
-            long now = Stopwatch.GetTimestamp();
+            accountStream?.Drain();
+            if (accountStream?.Faulted == true)
+                throw new IOException("User-data stream lost account reconciliation.");
+            if (mode == ExecutionMode.SeedData)
+            {
+                long now = Stopwatch.GetTimestamp();
 
-            var recorded = new RecordedMessage(
-                recordingId,
-                ++recordingSequence,
-                NanosecondTime.FromTicks(now - recordingStartTimestamp, Stopwatch.Frequency),
-                (short)message.Type,
-                message.Payload.AsSpan(0, message.Length).ToArray());
+                var recorded = new RecordedMessage(
+                    recordingId,
+                    ++recordingSequence,
+                    NanosecondTime.FromTicks(now - recordingStartTimestamp, Stopwatch.Frequency),
+                    (short)message.Type,
+                    message.Payload.AsSpan(0, message.Length).ToArray());
 
-            if (!recordedMessages.Writer.TryWrite(recorded))
-                throw new InvalidOperationException(
-                    "Recording queue is full. Stop the capture to avoid losing messages.");
+                if (!recordedMessages.Writer.TryWrite(recorded))
+                    throw new InvalidOperationException(
+                        "Recording queue is full. Stop the capture to avoid losing messages.");
 
-            return;
+                return;
+            }
+
+            DecodeSbeMessage(message.Length);
         }
-
-        DecodeSbeMessage(message.Length);
+        finally { Benchmark?.EndFrame(); }
     }
 
     private ClientWebSocket PrepareClient()
@@ -190,6 +206,7 @@ public sealed class BinanceFeedReader
             buffer,
             0,
             MessageHeader.SbeSchemaVersion);
+        Benchmark?.SetTemplate(header.TemplateId);
         if (header.TemplateId == BestBidAskStreamEvent.TemplateId)
         {
             DecodeBestBidAsk(buffer);
@@ -213,6 +230,7 @@ public sealed class BinanceFeedReader
 
     private void DecodeBestBidAsk(DirectBuffer buffer)
     {
+        long decodeStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
         if (QuoteReceived is null && !logEvents && !syntheticReplay) return;
         quoteDecoder.WrapForDecode(
             buffer,
@@ -241,6 +259,7 @@ public sealed class BinanceFeedReader
             InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
             if (runtime is not null && !runtime.OrderBook.IsSynchronized)
             {
+                runtime.SetSyntheticPrecision(priceExponent, qtyExponent);
                 Instrument instrument = runtime.Instrument;
                 long bidTicks = instrument.ToPriceTicks(bidPrice);
                 long askTicks = instrument.ToPriceTicks(askPrice);
@@ -252,6 +271,7 @@ public sealed class BinanceFeedReader
                         quoteDecoder.BookUpdateId);
             }
         }
+        Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
         if (QuoteReceived is null && !logEvents) return;
         string symbol = Encoding.UTF8.GetString(symbolBytes[..symbolLength]);
         var quote = new BestQuote(
@@ -268,6 +288,7 @@ public sealed class BinanceFeedReader
 
     private void DecodeDepthDiff(DirectBuffer buffer)
     {
+        long decodeStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
         depthDecoder.WrapForDecode(
             buffer,
             MessageHeader.Size,
@@ -301,8 +322,10 @@ public sealed class BinanceFeedReader
         Span<byte> symbolBytes = stackalloc byte[64];
         int symbolLength = depthDecoder.GetSymbol(symbolBytes);
         InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
+        Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
         if (syntheticReplay && runtime is not null && !runtime.OrderBook.IsSynchronized)
         {
+            runtime.SetSyntheticPrecision(priceExponent, qtyExponent);
             for (int i = 0; i < bidCount && !runtime.OrderBook.IsSynchronized; i++)
             {
                 DepthLevel level = bidChanges[i];
@@ -319,6 +342,7 @@ public sealed class BinanceFeedReader
             }
         }
         bool wasSynchronized = runtime?.OrderBook.IsSynchronized ?? false;
+        long bookStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
         if (runtime is not null && runtime.BeginDepth(depthDecoder.FirstBookUpdateId, depthDecoder.LastBookUpdateId))
         {
             bool valid = true;
@@ -341,8 +365,10 @@ public sealed class BinanceFeedReader
                         runtime.ApplyAsk(price, quantity);
             }
             if (!valid) runtime.Invalidate();
+            Benchmark?.AddBook(Stopwatch.GetTimestamp() - bookStart);
             QuoteDecision decision = valid ? runtime.EndDepth(checked(depthDecoder.EventTime * 1_000)) : runtime.Evaluate();
-            DecisionProduced?.Invoke(runtime, decision);
+            if (valid) Benchmark?.AddSignalAndQuote(runtime.LastSignalTicks, runtime.LastQuoteTicks);
+            EmitDecision(runtime, decision);
             if (runtime.SignalMemory.Faulted && !replay)
                 throw new IOException($"Signal history exhausted for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
             if (!runtime.OrderBook.IsSynchronized && !replay)
@@ -350,7 +376,8 @@ public sealed class BinanceFeedReader
         }
         else if (runtime is not null && wasSynchronized && !runtime.OrderBook.IsSynchronized)
         {
-            DecisionProduced?.Invoke(runtime, runtime.Evaluate());
+            Benchmark?.AddBook(Stopwatch.GetTimestamp() - bookStart);
+            EmitDecision(runtime, runtime.Evaluate());
             if (!replay)
                 throw new IOException($"Depth sequence gap for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
         }
@@ -379,6 +406,7 @@ public sealed class BinanceFeedReader
 
     private void DecodeTrades(DirectBuffer buffer)
     {
+        long decodeStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
         tradesDecoder.WrapForDecode(buffer, MessageHeader.Size, header.BlockLength, header.Version);
         int count = 0;
         var group = tradesDecoder.Trades;
@@ -393,6 +421,7 @@ public sealed class BinanceFeedReader
         Span<byte> symbol = stackalloc byte[64];
         int length = tradesDecoder.GetSymbol(symbol);
         InstrumentRuntime? runtime = FindRuntime(symbol[..length]);
+        Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
         if (runtime is null) return;
         long timeNs = checked(tradesDecoder.EventTime * 1_000);
         for (int i = 0; i < count; i++)
@@ -404,10 +433,17 @@ public sealed class BinanceFeedReader
                 return;
             }
             QuoteDecision decision = runtime.OnMarketTrade(timeNs, quantity, tradeAggressors[i]);
-            DecisionProduced?.Invoke(runtime, decision);
+            Benchmark?.AddSignalAndQuote(runtime.LastSignalTicks, runtime.LastQuoteTicks);
+            EmitDecision(runtime, decision);
             if (runtime.SignalMemory.Faulted && !replay)
                 throw new IOException($"Trade history exhausted for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
         }
+    }
+
+    private void EmitDecision(InstrumentRuntime runtime, in QuoteDecision decision)
+    {
+        Benchmark?.Decision(runtime, decision);
+        DecisionProduced?.Invoke(runtime, decision);
     }
 
     private InstrumentRuntime? FindRuntime(ReadOnlySpan<byte> symbol)
@@ -494,7 +530,8 @@ public sealed class BinanceFeedReader
     public readonly record struct WsMessage(
         WebSocketMessageType Type,
         byte[] Payload,
-        int Length);
+        int Length,
+        long ReceivedTimestamp = 0);
 
     public readonly record struct RecordedMessage(
         Guid RecordingId,

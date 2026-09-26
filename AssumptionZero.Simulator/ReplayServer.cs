@@ -6,7 +6,7 @@ namespace AssumptionZero.Simulator;
 public static class ReplayServer
 {
     public static WebApplication Create(Recording recording, string url = "http://127.0.0.1:5080",
-        Action<ReplayReport>? reportCompleted = null, int fragmentSize = 0)
+        Action<ReplayReport>? reportCompleted = null, int fragmentSize = 0, double speed = 1)
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls(url);
@@ -41,7 +41,7 @@ public static class ReplayServer
                 {
                     report = await Task.Factory.StartNew(
                         () => new ReplayEngine(new StopwatchReplayClock()).Run(recording,
-                            (message, token) => SendMessage(socket, message, fragmentSize, token), session.Token),
+                            (message, token) => SendMessage(socket, message, fragmentSize, token), session.Token, speed),
                         CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
 
                     using var closeTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(5));

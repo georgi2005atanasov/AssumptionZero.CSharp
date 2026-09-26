@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using AssumptionZero.Infrastructure.Benchmarking;
 using System.Net.WebSockets;
 using AssumptionZero.Application.Services;
 using AssumptionZero.Domain.Entities;
@@ -39,7 +40,7 @@ public class TradingPipelineTests
     }
 
     private static byte[] Depth(long updateId, long eventTimeMicros, long bidQuantity = 30,
-        string symbol = "BTCUSDT")
+        string symbol = "BTCUSDT", sbyte priceExponent = 0, sbyte qtyExponent = 0)
     {
         var bytes = new byte[256];
         var encoder = new DepthDiffStreamEvent().WrapForEncodeAndApplyHeader(
@@ -47,8 +48,8 @@ public class TradingPipelineTests
         encoder.EventTime = eventTimeMicros;
         encoder.FirstBookUpdateId = updateId;
         encoder.LastBookUpdateId = updateId;
-        encoder.PriceExponent = 0;
-        encoder.QtyExponent = 0;
+        encoder.PriceExponent = priceExponent;
+        encoder.QtyExponent = qtyExponent;
         var bid = encoder.BidsCount(1).Next();
         bid.Price = 100;
         bid.Qty = bidQuantity;
@@ -59,19 +60,20 @@ public class TradingPipelineTests
         return bytes[..encoder.Limit];
     }
 
-    private static byte[] Quote(string symbol, long updateId)
+    private static byte[] Quote(string symbol, long updateId, long bidQuantity = 30,
+        long askQuantity = 10, sbyte priceExponent = 0, sbyte qtyExponent = 0)
     {
         var bytes = new byte[128];
         var encoder = new BestBidAskStreamEvent().WrapForEncodeAndApplyHeader(
             new DirectBuffer(bytes), 0, new MessageHeader());
         encoder.EventTime = 0;
         encoder.BookUpdateId = updateId;
-        encoder.PriceExponent = 0;
-        encoder.QtyExponent = 0;
+        encoder.PriceExponent = priceExponent;
+        encoder.QtyExponent = qtyExponent;
         encoder.BidPrice = 100;
-        encoder.BidQty = 30;
+        encoder.BidQty = bidQuantity;
         encoder.AskPrice = 102;
-        encoder.AskQty = 10;
+        encoder.AskQty = askQuantity;
         encoder.SetSymbol(symbol);
         return bytes[..encoder.Limit];
     }
@@ -90,6 +92,27 @@ public class TradingPipelineTests
         trade.Qty = 5; // 0.5: valid trade flow even though order step is 1.
         trade.IsBuyerMaker = BoolEnum.False;
         encoder.SetSymbol(symbol);
+        return bytes[..encoder.Limit];
+    }
+
+    private static byte[] TwoTrades(long eventTimeMicros)
+    {
+        var bytes = new byte[256];
+        var encoder = new TradesStreamEvent().WrapForEncodeAndApplyHeader(
+            new DirectBuffer(bytes), 0, new MessageHeader());
+        encoder.EventTime = eventTimeMicros;
+        encoder.PriceExponent = 0;
+        encoder.QtyExponent = -1;
+        var trades = encoder.TradesCount(2);
+        for (int i = 0; i < 2; i++)
+        {
+            var trade = trades.Next();
+            trade.Id = i + 1;
+            trade.Price = 101;
+            trade.Qty = 5;
+            trade.IsBuyerMaker = BoolEnum.False;
+        }
+        encoder.SetSymbol("BTCUSDT");
         return bytes[..encoder.Limit];
     }
 
@@ -413,6 +436,32 @@ public class TradingPipelineTests
     }
 
     [TestMethod]
+    public void SyntheticReplayUsesObservedQuantityScaleForLargeMarketQuotes()
+    {
+        var ledger = new AccountRiskLedger(["SHIB", "USDT"]);
+        ledger.BeginSnapshot(0);
+        ledger.SetBalance(0, 100, 0);
+        ledger.SetBalance(1, 100_000, 0);
+        ledger.CompleteSnapshot();
+        var runtime = new InstrumentRuntime(new Instrument(0, "SHIBUSDT", "SHIB", "USDT",
+            1m, 1m, 1m, 1_000_000m, 0), new HotConfig(bookLevels: 10),
+            ledger, 100, 10_100, syntheticReplay: true);
+        runtime.OnBalanceChanged();
+        var feed = new BinanceFeedReader("", ["SHIBUSDT"], "ws://127.0.0.1/stream",
+            replay: true, logEvents: false, runtimes: [runtime], syntheticReplay: true);
+        const long bidMantissa = 2_676_897_829_200;
+        feed.ProcessBinaryFrame(Quote("SHIBUSDT", 40, bidMantissa, 1_000_000,
+            priceExponent: -8, qtyExponent: -2));
+        Assert.AreEqual(0.01m, runtime.Instrument.QuantityStepSize);
+        Assert.AreEqual(0.00000001m, runtime.Instrument.TickSize);
+        Assert.IsTrue(runtime.OrderBook.IsSynchronized);
+        Assert.AreEqual(bidMantissa, runtime.OrderBook.Bids[0].Quantity);
+        feed.ProcessBinaryFrame(Depth(41, 1_000, bidMantissa, "SHIBUSDT",
+            priceExponent: -8, qtyExponent: -2));
+        Assert.AreEqual(41L, runtime.OrderBook.LastUpdateId);
+    }
+
+    [TestMethod]
     public async Task FragmentedSocketReplayProducesIdenticalDecisionsOnTwoRuns()
     {
         var recording = new Recording(Guid.NewGuid(), Enumerable.Range(0, 4)
@@ -428,13 +477,47 @@ public class TradingPipelineTests
             var (runtime, _) = Runtime();
             var reader = new BinanceFeedReader("", ["BTCUSDT"], url,
                 replay: true, logEvents: false, runtimes: [runtime]);
+            using var benchmark = new ReplayBenchmarkRecorder(4, 1, diagnostic: false);
+            reader.Benchmark = benchmark;
             var decisions = new List<QuoteDecision>();
             reader.DecisionProduced += (_, decision) => decisions.Add(decision);
             await reader.Start(executionMode: ExecutionMode.Replay).WaitAsync(TimeSpan.FromSeconds(10));
+            BenchmarkAppReport report = benchmark.Finish(true);
+            Assert.AreEqual(4, report.ReceivedFrames);
+            Assert.AreEqual(4, report.TotalDecisions);
+            Assert.AreEqual(3, report.ProcessingNanoseconds.Count);
+            Assert.IsTrue(report.Frames.All(frame => frame.ProcessingEndTicks >= frame.ReceiveTicks));
+            Assert.IsTrue(report.Frames.Skip(1).All(frame => frame.BookTicks > 0 && frame.SignalTicks > 0));
             runs.Add(decisions.ToArray());
         }
         Assert.AreEqual(4, runs[0].Length);
         CollectionAssert.AreEqual(runs[0], runs[1]);
+    }
+
+    [TestMethod]
+    public async Task BenchmarkCountsQuoteOnlyFramesAndAllDecisionsInsideTradeFrames()
+    {
+        var recording = new Recording(Guid.NewGuid(),
+        [
+            new(1, 0, WebSocketMessageType.Binary, Quote("BTCUSDT", 10)),
+            new(2, 1_000_000, WebSocketMessageType.Binary, Depth(11, 1_000)),
+            new(3, 2_000_000, WebSocketMessageType.Binary, TwoTrades(2_000))
+        ]);
+        await using var server = ReplayServer.Create(recording, "http://127.0.0.1:0",
+            reportCompleted: _ => { }, fragmentSize: 7);
+        await server.StartAsync();
+        var (runtime, _) = Runtime();
+        var feed = new BinanceFeedReader("", ["BTCUSDT"],
+            server.Urls.Single().Replace("http://", "ws://") + "/stream",
+            replay: true, logEvents: false, runtimes: [runtime]);
+        using var benchmark = new ReplayBenchmarkRecorder(3, 1, diagnostic: false);
+        feed.Benchmark = benchmark;
+        await feed.Start(executionMode: ExecutionMode.Replay).WaitAsync(TimeSpan.FromSeconds(10));
+        BenchmarkAppReport report = benchmark.Finish(true);
+        Assert.AreEqual(3, report.ReceivedFrames);
+        Assert.AreEqual(3, report.TotalDecisions);
+        CollectionAssert.AreEqual(new[] { 0, 1, 2 }, report.Frames.Select(f => f.Decisions).ToArray());
+        Assert.AreEqual(2, report.ReceiveToDecisionNanoseconds.Count);
     }
 
     [TestMethod]
