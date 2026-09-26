@@ -7,20 +7,34 @@ using AssumptionZero.Domain.InMemory;
 
 namespace AssumptionZero.Infrastructure.External;
 
-public enum AccountEventKind : byte { Balance, Execution, Invalidate }
+public enum AccountEventKind : byte
+{
+    Balance,
+    Execution,
+    Invalidate
+}
 
 public readonly record struct AccountEvent(
-    AccountEventKind Kind, int Asset, decimal Free, decimal Locked,
-    int Runtime, bool Buy, long OrderId, long Filled, long FillPriceTicks,
-    long TimeNs, OrderStatus Status);
+    AccountEventKind Kind,
+    int Asset,
+    decimal Free,
+    decimal Locked,
+    int Runtime,
+    bool Buy,
+    long OrderId,
+    long Filled,
+    long FillPriceTicks,
+    long TimeNs,
+    OrderStatus Status);
 
 /// <summary>Read-only user-data stream. One socket producer publishes value events to the market writer.</summary>
-public sealed class BinanceAccountStream : IAsyncDisposable
+public sealed class BinanceAccountStream(
+    string apiKey,
+    BinanceLiveBootstrap bootstrap,
+    AccountRiskLedger ledger,
+    InstrumentRuntime[] runtimes)
+    : IAsyncDisposable
 {
-    private readonly string apiKey;
-    private readonly BinanceLiveBootstrap bootstrap;
-    private readonly AccountRiskLedger ledger;
-    private readonly InstrumentRuntime[] runtimes;
     private readonly SpscRingBuffer<AccountEvent> events = new(8_192);
     private readonly byte[] buffer = new byte[1024 * 1024];
     private readonly ClientWebSocket socket = new();
@@ -28,38 +42,30 @@ public sealed class BinanceAccountStream : IAsyncDisposable
     private int faulted;
     public bool Faulted => Volatile.Read(ref faulted) != 0;
 
-    public BinanceAccountStream(string apiKey, BinanceLiveBootstrap bootstrap,
-        AccountRiskLedger ledger, InstrumentRuntime[] runtimes)
+    public async Task Start(CancellationToken cancellationToken)
     {
-        this.apiKey = apiKey;
-        this.bootstrap = bootstrap;
-        this.ledger = ledger;
-        this.runtimes = runtimes;
-    }
-
-    public async Task StartAsync(CancellationToken cancellationToken)
-    {
-        await socket.ConnectAsync(new Uri("wss://ws-api.testnet.binance.vision/ws-api/v3"), cancellationToken);
+        await socket.ConnectAsync(new Uri(AppConstants.WsBinanceV3), cancellationToken);
         long timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
-        string signature = await bootstrap.SignAsync($"apiKey={apiKey}&timestamp={timestamp}", cancellationToken);
+        string signature = await bootstrap.Sign($"apiKey={apiKey}&timestamp={timestamp}", cancellationToken);
         string request = JsonSerializer.Serialize(new
         {
             id = 1,
             method = "userDataStream.subscribe.signature",
-            @params = new { apiKey, timestamp, signature }
+            @params = new { apiKey = apiKey, timestamp, signature }
         });
         byte[] bytes = Encoding.UTF8.GetBytes(request);
         await socket.SendAsync(bytes.AsMemory(), WebSocketMessageType.Text, true, cancellationToken);
-        int length = await ReceiveAsync(cancellationToken);
+        int length = await Receive(cancellationToken);
         using (JsonDocument response = JsonDocument.Parse(buffer.AsMemory(0, length)))
         {
             if (!response.RootElement.TryGetProperty("status", out JsonElement status) || status.GetInt32() != 200)
                 throw new InvalidOperationException("Binance user-data subscription failed.");
         }
-        runTask = RunAsync(cancellationToken);
+
+        runTask = Run(cancellationToken);
     }
 
-    private async Task RunAsync(CancellationToken cancellationToken)
+    private async Task Run(CancellationToken cancellationToken)
     {
         try
         {
@@ -69,21 +75,29 @@ public sealed class BinanceAccountStream : IAsyncDisposable
                 ValueWebSocketReceiveResult result;
                 do
                 {
-                    if (length == buffer.Length) throw new InvalidDataException("Account event exceeded receive buffer.");
+                    if (length == buffer.Length)
+                        throw new InvalidDataException("Account event exceeded receive buffer.");
                     result = await socket.ReceiveAsync(buffer.AsMemory(length), cancellationToken);
-                    if (result.MessageType == WebSocketMessageType.Close) throw new IOException("Account stream closed.");
+                    if (result.MessageType == WebSocketMessageType.Close)
+                        throw new IOException("Account stream closed.");
                     length += result.Count;
                 } while (!result.EndOfMessage);
+
                 if (result.MessageType != WebSocketMessageType.Text)
                     throw new InvalidDataException("Unexpected account event format.");
                 if (!ParseEvent(buffer.AsSpan(0, length))) Volatile.Write(ref faulted, 1);
             }
         }
-        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested) { }
-        catch { Volatile.Write(ref faulted, 1); }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch
+        {
+            Volatile.Write(ref faulted, 1);
+        }
     }
 
-    private async Task<int> ReceiveAsync(CancellationToken cancellationToken)
+    private async Task<int> Receive(CancellationToken cancellationToken)
     {
         int length = 0;
         ValueWebSocketReceiveResult result;
@@ -94,7 +108,9 @@ public sealed class BinanceAccountStream : IAsyncDisposable
             if (result.MessageType == WebSocketMessageType.Close) throw new IOException("Account stream closed.");
             length += result.Count;
         } while (!result.EndOfMessage);
-        if (result.MessageType != WebSocketMessageType.Text) throw new InvalidDataException("Unexpected account event format.");
+
+        if (result.MessageType != WebSocketMessageType.Text)
+            throw new InvalidDataException("Unexpected account event format.");
         return length;
     }
 
@@ -107,6 +123,7 @@ public sealed class BinanceAccountStream : IAsyncDisposable
             if (!reader.Read() || reader.TokenType != JsonTokenType.StartObject) return false;
             return ParseEventObject(ref reader);
         }
+
         return true; // Subscription or control response.
     }
 
@@ -128,6 +145,7 @@ public sealed class BinanceAccountStream : IAsyncDisposable
                 if (reader.TokenType == JsonTokenType.StartArray && !ParseBalances(ref reader)) return false;
                 continue;
             }
+
             int field = reader.ValueSpan.Length == 1 ? reader.ValueSpan[0] : 0;
             if (!reader.Read()) return false;
             switch (field)
@@ -140,12 +158,17 @@ public sealed class BinanceAccountStream : IAsyncDisposable
                 case 's': runtimeIndex = FindRuntime(reader.ValueSpan); break;
                 case 'S': buy = reader.ValueTextEquals("BUY"u8); break;
                 case 'i': orderId = reader.GetInt64(); break;
-                case 'z': if (!ParseDecimal(reader.ValueSpan, out filled)) return false; break;
-                case 'L': if (!ParseDecimal(reader.ValueSpan, out fillPrice)) return false; break;
+                case 'z':
+                    if (!ParseDecimal(reader.ValueSpan, out filled)) return false;
+                    break;
+                case 'L':
+                    if (!ParseDecimal(reader.ValueSpan, out fillPrice)) return false;
+                    break;
                 case 'T': timeMs = reader.GetInt64(); break;
                 case 'X': status = ParseStatus(reader.ValueSpan); break;
             }
         }
+
         if (kind == AccountEventKind.Balance) return true;
         if (kind != AccountEventKind.Execution || runtimeIndex < 0 || orderId <= 0 || status is null) return false;
         InstrumentRuntime runtime = runtimes[runtimeIndex];
@@ -172,9 +195,11 @@ public sealed class BinanceAccountStream : IAsyncDisposable
                 else if (field == 'f' && !ParseDecimal(reader.ValueSpan, out free)) return false;
                 else if (field == 'l' && !ParseDecimal(reader.ValueSpan, out locked)) return false;
             }
+
             if (asset >= 0 && !events.TryEnqueue(new AccountEvent(AccountEventKind.Balance, asset, free, locked,
                     -1, false, 0, 0, 0, 0, default))) return false;
         }
+
         return false;
     }
 
@@ -186,9 +211,15 @@ public sealed class BinanceAccountStream : IAsyncDisposable
             if (name.Length != symbol.Length) continue;
             bool equal = true;
             for (int j = 0; j < name.Length; j++)
-                if (name[j] != symbol[j]) { equal = false; break; }
+                if (name[j] != symbol[j])
+                {
+                    equal = false;
+                    break;
+                }
+
             if (equal) return i;
         }
+
         return -1;
     }
 
@@ -215,6 +246,7 @@ public sealed class BinanceAccountStream : IAsyncDisposable
             foreach (InstrumentRuntime runtime in runtimes) runtime.Invalidate();
             return;
         }
+
         while (events.TryDequeue(out AccountEvent item))
         {
             if (item.Kind == AccountEventKind.Balance)

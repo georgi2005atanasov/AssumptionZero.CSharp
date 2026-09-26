@@ -1,25 +1,19 @@
 namespace AssumptionZero.Domain.InMemory;
 
 /// <summary>A bounded, price-sorted L2 book. A quantity of zero removes a level.</summary>
-public struct OrderBook
+public struct OrderBook(int capacity)
 {
-    public BookLevel[] Bids { get; }
-    public BookLevel[] Asks { get; }
-    public int BidCount { get; private set; }
-    public int AskCount { get; private set; }
-    public long LastUpdateId { get; private set; }
-    public bool IsSynchronized { get; private set; }
+    public BookLevel[] Bids { get; } = new BookLevel[capacity];
 
-    public OrderBook(int capacity)
-    {
-        ArgumentOutOfRangeException.ThrowIfLessThan(capacity, 1);
-        Bids = new BookLevel[capacity];
-        Asks = new BookLevel[capacity];
-        BidCount = 0;
-        AskCount = 0;
-        LastUpdateId = 0;
-        IsSynchronized = false;
-    }
+    public BookLevel[] Asks { get; } = new BookLevel[capacity];
+
+    public int BidCount { get; private set; } = 0;
+
+    public int AskCount { get; private set; } = 0;
+
+    public long LastUpdateId { get; private set; } = 0;
+
+    public bool IsSynchronized { get; private set; } = false;
 
     public void Invalidate() => IsSynchronized = false;
 

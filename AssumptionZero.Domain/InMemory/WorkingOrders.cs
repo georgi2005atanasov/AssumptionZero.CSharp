@@ -14,6 +14,7 @@ public struct WorkingOrder
     /// 65000.00 => 6_500_000 ticks
     /// </summary>
     public long PriceTicks;
+
     public long Quantity;
     public long FilledQuantity;
 

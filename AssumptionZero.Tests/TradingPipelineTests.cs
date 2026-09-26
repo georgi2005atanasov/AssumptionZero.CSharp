@@ -32,10 +32,14 @@ public class TradingPipelineTests
         var runtime = new InstrumentRuntime(Instrument(), config, ledger, 100, 200);
         runtime.OnBalanceChanged();
         Assert.IsTrue(runtime.LoadSnapshot(
-            [new BookLevel { PriceTicks = 100, Quantity = 30 },
-             new BookLevel { PriceTicks = 99, Quantity = 20 }],
-            [new BookLevel { PriceTicks = 102, Quantity = 10 },
-             new BookLevel { PriceTicks = 103, Quantity = 20 }], 9));
+            [
+                new BookLevel { PriceTicks = 100, Quantity = 30 },
+                new BookLevel { PriceTicks = 99, Quantity = 20 }
+            ],
+            [
+                new BookLevel { PriceTicks = 102, Quantity = 10 },
+                new BookLevel { PriceTicks = 103, Quantity = 20 }
+            ], 9));
         return (runtime, ledger);
     }
 
@@ -112,6 +116,7 @@ public class TradingPipelineTests
             trade.Qty = 5;
             trade.IsBuyerMaker = BoolEnum.False;
         }
+
         encoder.SetSymbol("BTCUSDT");
         return bytes[..encoder.Limit];
     }
@@ -171,10 +176,16 @@ public class TradingPipelineTests
 
         var orders = new WorkingOrders
         {
-            BidOrder = new WorkingOrder { OrderId = 1, PriceTicks = 100, Quantity = 10,
-                Status = OrderStatus.New, IsActive = true },
-            AskOrder = new WorkingOrder { OrderId = 2, PriceTicks = 104, Quantity = 10,
-                Status = OrderStatus.New, IsActive = true }
+            BidOrder = new WorkingOrder
+            {
+                OrderId = 1, PriceTicks = 100, Quantity = 10,
+                Status = OrderStatus.New, IsActive = true
+            },
+            AskOrder = new WorkingOrder
+            {
+                OrderId = 2, PriceTicks = 104, Quantity = 10,
+                Status = OrderStatus.New, IsActive = true
+            }
         };
         decision = runtime.Strategy.Evaluate(runtime.Instrument, runtime.Config,
             runtime.OrderBook, signals, runtime.Inventory, orders, ref pricing,
@@ -212,11 +223,14 @@ public class TradingPipelineTests
         runtime.EndDepth(1_000);
         Assert.IsTrue(runtime.Ready);
 
-        var working = new WorkingOrders { BidOrder = new WorkingOrder
+        var working = new WorkingOrders
         {
-            OrderId = 42, PriceTicks = 100, Quantity = 10,
-            Status = OrderStatus.New, IsActive = true
-        } };
+            BidOrder = new WorkingOrder
+            {
+                OrderId = 42, PriceTicks = 100, Quantity = 10,
+                Status = OrderStatus.New, IsActive = true
+            }
+        };
         runtime.SetWorkingOrders(working);
         runtime.OnExecution(true, 42, 3, 100, 2_000, OrderStatus.PartiallyFilled);
         Assert.AreEqual(103L, runtime.Inventory.CurrentQuantity);
@@ -312,6 +326,7 @@ public class TradingPipelineTests
             Assert.IsTrue(queue.TryDequeue(out int value));
             Assert.AreEqual(i, value);
         }
+
         Assert.IsFalse(queue.TryDequeue(out _));
     }
 
@@ -396,6 +411,7 @@ public class TradingPipelineTests
             feed.ProcessBinaryFrame(btcFrames[i]);
             feed.ProcessBinaryFrame(ethFrames[i]);
         }
+
         Assert.IsTrue(btc.Ready);
         Assert.IsTrue(eth.Ready);
         long before = GC.GetAllocatedBytesForCurrentThread();
@@ -408,6 +424,7 @@ public class TradingPipelineTests
             feed.ProcessBinaryFrame(ethTrades[i - 100]);
             feed.ProcessBinaryFrame(ethQuote);
         }
+
         Assert.AreEqual(0L, GC.GetAllocatedBytesForCurrentThread() - before);
         Assert.AreEqual(500, btcDecisions);
         Assert.AreEqual(500, ethDecisions);
@@ -444,7 +461,7 @@ public class TradingPipelineTests
         ledger.SetBalance(1, 100_000, 0);
         ledger.CompleteSnapshot();
         var runtime = new InstrumentRuntime(new Instrument(0, "SHIBUSDT", "SHIB", "USDT",
-            1m, 1m, 1m, 1_000_000m, 0), new HotConfig(bookLevels: 10),
+                1m, 1m, 1m, 1_000_000m, 0), new HotConfig(bookLevels: 10),
             ledger, 100, 10_100, syntheticReplay: true);
         runtime.OnBalanceChanged();
         var feed = new BinanceFeedReader("", ["SHIBUSDT"], "ws://127.0.0.1/stream",
@@ -490,6 +507,7 @@ public class TradingPipelineTests
             Assert.IsTrue(report.Frames.Skip(1).All(frame => frame.BookTicks > 0 && frame.SignalTicks > 0));
             runs.Add(decisions.ToArray());
         }
+
         Assert.AreEqual(4, runs[0].Length);
         CollectionAssert.AreEqual(runs[0], runs[1]);
     }
@@ -575,6 +593,7 @@ public class TradingPipelineTests
             messages.Add(new ReplayMessage(messages.Count + 1, 0, WebSocketMessageType.Binary,
                 Depth(42 + i * 2, i * 60_000, symbol: "ETHUSDT")));
         }
+
         var recording = new Recording(Guid.NewGuid(), messages);
         foreach (int fragmentSize in new[] { 0, 7 })
         {
@@ -619,7 +638,7 @@ public class TradingPipelineTests
             const string payload = "apiKey=TEST&timestamp=123456";
             await File.WriteAllTextAsync(message, payload);
             using var signer = new BinanceLiveBootstrap("TEST", key);
-            byte[] bytes = Convert.FromBase64String(await signer.SignAsync(payload, CancellationToken.None));
+            byte[] bytes = Convert.FromBase64String(await signer.Sign(payload, CancellationToken.None));
             Assert.AreEqual(64, bytes.Length);
             await File.WriteAllBytesAsync(signature, bytes);
             Assert.AreEqual(0, await OpenSsl("pkeyutl", "-verify", "-pubin", "-inkey", publicKey,

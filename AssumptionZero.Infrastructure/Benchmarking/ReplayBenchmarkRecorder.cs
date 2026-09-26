@@ -42,7 +42,14 @@ public sealed class GcPauseListener : EventListener
     private readonly List<GcPause> pauses = new();
     private long pendingStart;
     private int pendingReason;
-    public IReadOnlyList<GcPause> Pauses { get { lock (pauses) return pauses.ToArray(); } }
+
+    public IReadOnlyList<GcPause> Pauses
+    {
+        get
+        {
+            lock (pauses) return pauses.ToArray();
+        }
+    }
 
     protected override void OnEventSourceCreated(EventSource source)
     {
@@ -57,7 +64,11 @@ public sealed class GcPauseListener : EventListener
         {
             int reason = e.Payload?.Count > 0 ? Convert.ToInt32(e.Payload[0]) : -1;
             if (reason is not (1 or 6)) return;
-            lock (pauses) { pendingStart = e.TimeStamp.ToUniversalTime().Ticks; pendingReason = reason; }
+            lock (pauses)
+            {
+                pendingStart = e.TimeStamp.ToUniversalTime().Ticks;
+                pendingReason = reason;
+            }
         }
         else if (e.EventId == 3)
         {
@@ -84,6 +95,7 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
     private int count;
     private ulong decisionHash = 14695981039346656037UL;
     private int totalDecisions;
+
     public ReplayBenchmarkRecorder(int expectedFrames, int warmupFrames, bool diagnostic)
     {
         if (expectedFrames <= 0 || warmupFrames < 0 || warmupFrames >= expectedFrames)
@@ -95,6 +107,7 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
     }
 
     public int Count => count;
+
     public void BeginFrame(WebSocketMessageType type, int bytes, long receiveTicks)
     {
         if (count == frames.Length) throw new InvalidDataException("Received more frames than expected.");
@@ -103,19 +116,23 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
             Index = ++count, MessageType = type, Bytes = bytes, ReceiveTicks = receiveTicks
         };
     }
+
     public void EndFrame()
     {
         frames[count - 1].ProcessingEndTicks = Stopwatch.GetTimestamp();
         if (count == warmupFrames) CaptureStart();
     }
+
     public void SetTemplate(int templateId) => frames[count - 1].TemplateId = templateId;
     public void AddDecode(long ticks) => frames[count - 1].DecodeTicks += ticks;
     public void AddBook(long ticks) => frames[count - 1].BookTicks += ticks;
+
     public void AddSignalAndQuote(long signalTicks, long quoteTicks)
     {
         frames[count - 1].SignalTicks += signalTicks;
         frames[count - 1].QuoteTicks += quoteTicks;
     }
+
     public void Decision(InstrumentRuntime runtime, in QuoteDecision decision)
     {
         ref FrameSample frame = ref frames[count - 1];
@@ -123,10 +140,18 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         frame.LastDecisionTicks = Stopwatch.GetTimestamp();
         totalDecisions++;
         Mix(runtime.Instrument.Id);
-        Mix(decision.BidPriceTicks); Mix(decision.BidQuantity); Mix((long)decision.BidAction);
-        Mix(decision.AskPriceTicks); Mix(decision.AskQuantity); Mix((long)decision.AskAction);
+        Mix(decision.BidPriceTicks);
+        Mix(decision.BidQuantity);
+        Mix((long)decision.BidAction);
+        Mix(decision.AskPriceTicks);
+        Mix(decision.AskQuantity);
+        Mix((long)decision.AskAction);
     }
-    private void Mix(long value) { decisionHash = (decisionHash ^ (ulong)value) * 1099511628211UL; }
+
+    private void Mix(long value)
+    {
+        decisionHash = (decisionHash ^ (ulong)value) * 1099511628211UL;
+    }
 
     private void CaptureStart()
     {
@@ -150,14 +175,17 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         FrameSample[] recorded = frames.AsSpan(0, count).ToArray();
         long finishUtcTicks = DateTime.UtcNow.Ticks;
         var pauses = gcListener?.Pauses.Where(p => p.EndUtcTicks >= baseUtcTicks &&
-            p.StartUtcTicks <= finishUtcTicks).ToArray() ?? [];
+                                                   p.StartUtcTicks <= finishUtcTicks).ToArray() ?? [];
         if (pauses.Length > 0)
             for (int i = warmupFrames; i < recorded.Length; i++)
             {
-                long start = baseUtcTicks + (recorded[i].ReceiveTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond / Stopwatch.Frequency;
-                long end = baseUtcTicks + (recorded[i].ProcessingEndTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond / Stopwatch.Frequency;
+                long start = baseUtcTicks + (recorded[i].ReceiveTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond /
+                    Stopwatch.Frequency;
+                long end = baseUtcTicks + (recorded[i].ProcessingEndTicks - baseStopwatchTicks) *
+                    TimeSpan.TicksPerSecond / Stopwatch.Frequency;
                 recorded[i].GcPauseOverlap = pauses.Any(p => p.StartUtcTicks <= end && p.EndUtcTicks >= start);
             }
+
         int measuredCount = Math.Max(0, count - warmupFrames);
         var processing = new long[measuredCount];
         var receiveToDecision = new long[measuredCount];
@@ -166,14 +194,20 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         for (int i = warmupFrames; i < count; i++)
         {
             FrameSample f = recorded[i];
-            processing[i - warmupFrames] = NanosecondTime.FromTicks(f.ProcessingEndTicks - f.ReceiveTicks, Stopwatch.Frequency);
+            processing[i - warmupFrames] =
+                NanosecondTime.FromTicks(f.ProcessingEndTicks - f.ReceiveTicks, Stopwatch.Frequency);
             if (f.LastDecisionTicks != 0)
-                receiveToDecision[withDecision++] = NanosecondTime.FromTicks(f.LastDecisionTicks - f.ReceiveTicks, Stopwatch.Frequency);
+                receiveToDecision[withDecision++] =
+                    NanosecondTime.FromTicks(f.LastDecisionTicks - f.ReceiveTicks, Stopwatch.Frequency);
             measuredDecisions += f.Decisions;
             measuredBytes += f.Bytes;
         }
-        long durationNs = measuredCount == 0 ? 0 : NanosecondTime.FromTicks(
-            recorded[^1].ProcessingEndTicks - recorded[warmupFrames].ReceiveTicks, Stopwatch.Frequency);
+
+        long durationNs = measuredCount == 0
+            ? 0
+            : NanosecondTime.FromTicks(
+                recorded[^1].ProcessingEndTicks - recorded[warmupFrames].ReceiveTicks, Stopwatch.Frequency);
+
         LatencySummary Stage(Func<FrameSample, long> select)
         {
             long[] values = recorded.AsSpan(Math.Min(warmupFrames, recorded.Length)).ToArray()
@@ -181,6 +215,7 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
                 .Select(v => NanosecondTime.FromTicks(v, Stopwatch.Frequency)).ToArray();
             return LatencySummary.From(values, values.Length);
         }
+
         long[] pauseDurations = pauses.Select(p => Math.Max(0, p.EndUtcTicks - p.StartUtcTicks) * 100).ToArray();
         return new BenchmarkAppReport(3, completed, Stopwatch.Frequency, warmupFrames, count,
             totalDecisions, decisionHash.ToString("x16"), measuredCount, measuredDecisions, measuredBytes,
@@ -196,34 +231,73 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
             gcListener is not null,
             pauses, recorded);
     }
-    public void Dispose() { gcListener?.Dispose(); process.Dispose(); }
+
+    public void Dispose()
+    {
+        gcListener?.Dispose();
+        process.Dispose();
+    }
 }
 
-public sealed record BenchmarkAppReport(int SchemaVersion, bool Completed, long ClockFrequency,
-    int WarmupFrames, int ReceivedFrames, int TotalDecisions, string DecisionHash,
-    int MeasuredFrames, int MeasuredDecisions, long MeasuredBytes, long MeasuredDurationNanoseconds,
-    LatencySummary ProcessingNanoseconds, LatencySummary ReceiveToDecisionNanoseconds,
-    LatencySummary DecodeNanoseconds, LatencySummary BookNanoseconds,
-    LatencySummary SignalNanoseconds, LatencySummary QuoteNanoseconds,
-    long CpuNanoseconds, double CpuCores, double CpuNanosecondsPerFrame,
-    long ResidentBytes, long PeakResidentBytes, long ManagedHeapBytes,
-    long ManagedAllocatedBytes, double ManagedAllocatedBytesPerFrame,
-    int[] GcCollections, long GcPauseNanoseconds, LatencySummary IndividualGcPauseNanoseconds,
+public sealed record BenchmarkAppReport(
+    int SchemaVersion,
+    bool Completed,
+    long ClockFrequency,
+    int WarmupFrames,
+    int ReceivedFrames,
+    int TotalDecisions,
+    string DecisionHash,
+    int MeasuredFrames,
+    int MeasuredDecisions,
+    long MeasuredBytes,
+    long MeasuredDurationNanoseconds,
+    LatencySummary ProcessingNanoseconds,
+    LatencySummary ReceiveToDecisionNanoseconds,
+    LatencySummary DecodeNanoseconds,
+    LatencySummary BookNanoseconds,
+    LatencySummary SignalNanoseconds,
+    LatencySummary QuoteNanoseconds,
+    long CpuNanoseconds,
+    double CpuCores,
+    double CpuNanosecondsPerFrame,
+    long ResidentBytes,
+    long PeakResidentBytes,
+    long ManagedHeapBytes,
+    long ManagedAllocatedBytes,
+    double ManagedAllocatedBytesPerFrame,
+    int[] GcCollections,
+    long GcPauseNanoseconds,
+    LatencySummary IndividualGcPauseNanoseconds,
     bool Diagnostic,
-    GcPause[] GcPauses, FrameSample[] Frames)
+    GcPause[] GcPauses,
+    FrameSample[] Frames)
 {
     public void Write(string path) => File.WriteAllText(path,
         JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = false }));
 }
 
-public sealed record BenchmarkAppOverview(int ReceivedFrames, int TotalDecisions, int MeasuredFrames,
-    int MeasuredDecisions, long MeasuredBytes, long MeasuredDurationNanoseconds,
-    LatencySummary DecodeNanoseconds, LatencySummary BookNanoseconds,
-    LatencySummary SignalNanoseconds, LatencySummary QuoteNanoseconds,
-    long CpuNanoseconds, double CpuCores, double CpuNanosecondsPerFrame,
-    long ResidentBytes, long PeakResidentBytes, long ManagedHeapBytes,
-    long ManagedAllocatedBytes, double ManagedAllocatedBytesPerFrame,
-    int[] GcCollections, long GcPauseNanoseconds, LatencySummary IndividualGcPauseNanoseconds,
+public sealed record BenchmarkAppOverview(
+    int ReceivedFrames,
+    int TotalDecisions,
+    int MeasuredFrames,
+    int MeasuredDecisions,
+    long MeasuredBytes,
+    long MeasuredDurationNanoseconds,
+    LatencySummary DecodeNanoseconds,
+    LatencySummary BookNanoseconds,
+    LatencySummary SignalNanoseconds,
+    LatencySummary QuoteNanoseconds,
+    long CpuNanoseconds,
+    double CpuCores,
+    double CpuNanosecondsPerFrame,
+    long ResidentBytes,
+    long PeakResidentBytes,
+    long ManagedHeapBytes,
+    long ManagedAllocatedBytes,
+    double ManagedAllocatedBytesPerFrame,
+    int[] GcCollections,
+    long GcPauseNanoseconds,
+    LatencySummary IndividualGcPauseNanoseconds,
     int FramesOverlappingGc)
 {
     public static BenchmarkAppOverview From(BenchmarkAppReport app) => new(

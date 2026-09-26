@@ -1,6 +1,7 @@
 namespace AssumptionZero.Domain.InMemory;
 
 public readonly record struct TimedValue(long TimeNs, double Value);
+
 public readonly record struct PendingMarkout(long DueNs, long FillPriceTicks, int Side);
 
 /// <summary>Preallocated event-time history owned by one instrument writer.</summary>
@@ -47,7 +48,12 @@ public struct SignalMemory
 
     public void AddTrade(long timeNs, double quantity, bool aggressiveBuy, in HotConfig config)
     {
-        if (quantity <= 0 || !double.IsFinite(quantity)) { Faulted = true; return; }
+        if (quantity <= 0 || !double.IsFinite(quantity))
+        {
+            Faulted = true;
+            return;
+        }
+
         Expire(trades, ref tradeHead, ref tradeCount, timeNs - config.TradeFlowWindowNs);
         if (!Append(trades, ref tradeHead, ref tradeCount,
                 new TimedValue(timeNs, aggressiveBuy ? quantity : -quantity))) Faulted = true;
@@ -63,6 +69,7 @@ public struct SignalMemory
             if (value > 0) buyVolume += value;
             else sellVolume -= value;
         }
+
         state.TradeFlowImbalance = Ratio(buyVolume - sellVolume, buyVolume + sellVolume);
     }
 
@@ -81,20 +88,31 @@ public struct SignalMemory
             ofi[(ofiHead + ofiCount) % ofi.Length] = value;
             ofiCount++;
         }
+
         ofiSum += value;
         ofiAbsoluteSum += Math.Abs(value);
     }
 
     public void AddFill(long timeNs, long priceTicks, bool buy)
     {
-        if (markoutCount == markouts.Length) { Faulted = true; return; }
+        if (markoutCount == markouts.Length)
+        {
+            Faulted = true;
+            return;
+        }
+
         markouts[markoutCount++] = new PendingMarkout(checked(timeNs + 250_000_000), priceTicks, buy ? 1 : -1);
     }
 
     public double UpdateBook(long timeNs, in OrderBook book, in HotConfig config, ref SignalState state)
     {
         double mid = ((double)book.Bids[0].PriceTicks + book.Asks[0].PriceTicks) * 0.5;
-        if (!hasFirstMid) { firstMidTime = timeNs; hasFirstMid = true; }
+        if (!hasFirstMid)
+        {
+            firstMidTime = timeNs;
+            hasFirstMid = true;
+        }
+
         long keepMid = Math.Max(config.MomentumWindowNs, config.VolatilityWindowNs);
         ExpireKeepingPredecessor(mids, ref midHead, ref midCount, timeNs - keepMid);
         if (!Append(mids, ref midHead, ref midCount, new TimedValue(timeNs, mid))) Faulted = true;
@@ -107,6 +125,7 @@ public struct SignalMemory
             weightedBid += book.Bids[i].Quantity / (double)(i + 1);
             weightedAsk += book.Asks[i].Quantity / (double)(i + 1);
         }
+
         state.MultiLevelImbalance = Ratio(weightedBid - weightedAsk, weightedBid + weightedAsk);
         state.OrderFlowImbalance = Ratio(ofiSum, ofiAbsoluteSum);
         state.LiquidityUnits = (long)Math.Min(weightedBid, weightedAsk);
@@ -129,6 +148,7 @@ public struct SignalMemory
             if (sample.TimeNs > momentumCutoff) break;
             olderMid = sample.Value;
         }
+
         state.MomentumSignal = Math.Clamp((mid - olderMid) / config.MomentumScaleTicks, -1, 1);
 
         double sum = 0, sumSq = 0;
@@ -142,6 +162,7 @@ public struct SignalMemory
             sumSq += delta * delta;
             n++;
         }
+
         state.VolatilityTicks = n > 0 ? Math.Sqrt(Math.Max(0, sumSq / n - (sum / n) * (sum / n))) : 0;
 
         ResolveMarkouts(timeNs, config.TradeFlowWindowNs);
@@ -158,7 +179,12 @@ public struct SignalMemory
         for (int i = 0; i < markoutCount;)
         {
             PendingMarkout pending = markouts[i];
-            if (pending.DueNs > timeNs) { i++; continue; }
+            if (pending.DueNs > timeNs)
+            {
+                i++;
+                continue;
+            }
+
             bool found = false;
             double markMid = 0;
             for (int j = 0; j < midCount; j++)
@@ -169,7 +195,13 @@ public struct SignalMemory
                 found = true;
                 break;
             }
-            if (!found) { Faulted = true; break; }
+
+            if (!found)
+            {
+                Faulted = true;
+                break;
+            }
+
             double markout = pending.Side * (markMid - pending.FillPriceTicks);
             if (!Append(losses, ref lossHead, ref lossCount,
                     new TimedValue(timeNs, Math.Max(0, -markout)))) Faulted = true;

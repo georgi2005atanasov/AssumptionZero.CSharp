@@ -17,6 +17,7 @@ public class ReplayEngineTests
         public long Frequency => frequency;
         public long Now = 100;
         public long GetTimestamp() => Now;
+
         public void WaitUntil(long origin, long offsetTicks, CancellationToken cancellationToken)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -111,7 +112,8 @@ public class ReplayEngineTests
     public void CancellationAndSendFailureProduceIncompleteReports()
     {
         using var cancellation = new CancellationTokenSource();
-        var report = new ReplayEngine(new FakeClock()).Run(Capture(0, 100), (_, _) => cancellation.Cancel(), cancellation.Token);
+        var report =
+            new ReplayEngine(new FakeClock()).Run(Capture(0, 100), (_, _) => cancellation.Cancel(), cancellation.Token);
         Assert.IsFalse(report.Completed);
         Assert.AreEqual(1, report.SentMessages);
         Assert.IsNotNull(report.Error);

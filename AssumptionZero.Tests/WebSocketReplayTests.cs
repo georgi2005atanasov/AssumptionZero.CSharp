@@ -19,7 +19,10 @@ public class WebSocketReplayTests
     private sealed class RunningServer(WebApplication app, Channel<ReplayReport> reports) : IAsyncDisposable
     {
         public Uri Uri => new(app.Urls.Single().Replace("http://", "ws://") + "/stream?streams=ignored@depth");
-        public async Task<ReplayReport> Report() => await reports.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
+        public async Task<ReplayReport> Report() =>
+            await reports.Reader.ReadAsync().AsTask().WaitAsync(TimeSpan.FromSeconds(10));
+
         public async ValueTask DisposeAsync()
         {
             await app.StopAsync();
@@ -55,8 +58,10 @@ public class WebSocketReplayTests
                     await socket.CloseOutputAsync(WebSocketCloseStatus.NormalClosure, "Received", timeout.Token);
                     return messages;
                 }
+
                 message.Write(chunk.AsSpan(0, result.Count));
             } while (!result.EndOfMessage);
+
             long receipt = Stopwatch.GetTimestamp();
             messages.Add((message.ToArray(), result.MessageType, receipt));
         }
@@ -123,7 +128,8 @@ public class WebSocketReplayTests
     internal static byte[] QuotePayload()
     {
         var bytes = new byte[128];
-        var encoder = new BestBidAskStreamEvent().WrapForEncodeAndApplyHeader(new DirectBuffer(bytes), 0, new MessageHeader());
+        var encoder =
+            new BestBidAskStreamEvent().WrapForEncodeAndApplyHeader(new DirectBuffer(bytes), 0, new MessageHeader());
         encoder.EventTime = 1_700_000_000_123_456;
         encoder.BookUpdateId = 42;
         encoder.PriceExponent = -2;
@@ -160,7 +166,8 @@ public class WebSocketReplayTests
     public async Task DepthDecodingPreservesUpdatesAndReplayLoggingDefaultsOff()
     {
         var bytes = new byte[256];
-        var encoder = new DepthDiffStreamEvent().WrapForEncodeAndApplyHeader(new DirectBuffer(bytes), 0, new MessageHeader());
+        var encoder =
+            new DepthDiffStreamEvent().WrapForEncodeAndApplyHeader(new DirectBuffer(bytes), 0, new MessageHeader());
         encoder.EventTime = 123;
         encoder.FirstBookUpdateId = 40;
         encoder.LastBookUpdateId = 42;
@@ -196,7 +203,8 @@ public class WebSocketReplayTests
 
             output.GetStringBuilder().Clear();
             var live = new BinanceFeedReader("test", [], server.Uri.ToString(), logEvents: true);
-            await Assert.ThrowsExceptionAsync<IOException>(() => live.Start(executionMode: ExecutionMode.NormalExecution));
+            await Assert.ThrowsExceptionAsync<IOException>(() =>
+                live.Start(executionMode: ExecutionMode.NormalExecution));
             await server.Report();
             Assert.AreEqual(replayOutput, output.ToString());
         }
@@ -230,6 +238,7 @@ public class WebSocketReplayTests
         TestContext.WriteLine($"Server send-start lateness (ns): {report.SendStartLateness}");
         TestContext.WriteLine($"Server send duration (ns): {report.SendDuration}");
         TestContext.WriteLine($"Client receipt lateness (ns): {TimingStatistics.Calculate(receiptLateness, count)}");
-        TestContext.WriteLine($"Client absolute inter-receipt interval error (ns): {TimingStatistics.Calculate(receiptIntervals, count - 1)}");
+        TestContext.WriteLine(
+            $"Client absolute inter-receipt interval error (ns): {TimingStatistics.Calculate(receiptIntervals, count - 1)}");
     }
 }

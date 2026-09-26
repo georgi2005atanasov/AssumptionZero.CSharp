@@ -2,19 +2,37 @@ namespace AssumptionZero.Domain.InMemory;
 
 public readonly struct HotConfig
 {
-    public HotConfig() : this(bookLevels: 10) { }
+    public HotConfig() : this(bookLevels: 10)
+    {
+    }
 
-    public HotConfig(int bookLevels = 10, int ofiWindow = 100, long tradeFlowWindowNs = 500_000_000,
-        long volatilityWindowNs = 1_000_000_000, long momentumWindowNs = 5_000_000_000,
-        long liquidityWindowNs = 1_000_000_000, double momentumScaleTicks = 10,
-        double volatilityScaleTicks = 5, double adverseScaleTicks = 5,
-        double microWeight = 1, double mliWeight = 1, double ofiWeight = 1,
-        double tradeFlowWeight = 1, double momentumWeight = 1, double maxFairShiftTicks = 2,
-        double maxInventorySkewTicks = 2, double baseHalfSpreadTicks = 2,
-        double volatilitySpreadWeightTicks = 1, double liquiditySpreadWeightTicks = 1,
-        double adverseSpreadWeightTicks = 1, double inventorySpreadWeightTicks = 1,
-        long baseQuantity = 1_000, double minRiskSizeFactor = 0.25,
-        long minEdgeTicks = 1, long minimumReplaceMoveTicks = 2)
+    public HotConfig(
+        int bookLevels = 10,
+        int ofiWindow = 100,
+        long tradeFlowWindowNs = 500_000_000,
+        long volatilityWindowNs = 1_000_000_000,
+        long momentumWindowNs = 5_000_000_000,
+        long liquidityWindowNs = 1_000_000_000,
+        double momentumScaleTicks = 10,
+        double volatilityScaleTicks = 5,
+        double adverseScaleTicks = 5,
+        double microWeight = 1,
+        double mliWeight = 1,
+        double ofiWeight = 1,
+        double tradeFlowWeight = 1,
+        double momentumWeight = 1,
+        double maxFairShiftTicks = 2,
+        double maxInventorySkewTicks = 2,
+        double baseHalfSpreadTicks = 2,
+        double volatilitySpreadWeightTicks = 1,
+        double liquiditySpreadWeightTicks = 1,
+        double adverseSpreadWeightTicks = 1,
+        double inventorySpreadWeightTicks = 1,
+        long baseQuantity = 1_000,
+        double minRiskSizeFactor = 0.25,
+        long minEdgeTicks = 1,
+        long minimumReplaceMoveTicks = 2
+    )
     {
         if (bookLevels is < 1 or > 5_000 || ofiWindow is < 1 or > 8_192 ||
             tradeFlowWindowNs <= 0 || volatilityWindowNs <= 0 || momentumWindowNs <= 0 || liquidityWindowNs <= 0 ||

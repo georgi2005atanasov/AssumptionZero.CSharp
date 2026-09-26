@@ -31,17 +31,17 @@ public class Instrument
     /// BTCUSDT
     /// </summary>
     public required string Symbol { get; init; }
-    
+
     /// <summary>
     /// BTC
     /// </summary>
     public required string BaseAsset { get; init; }
-    
+
     /// <summary>
     /// USDT
     /// </summary>
     public required string QuoteAsset { get; init; }
-    
+
     public decimal TickSize { get; private set; }
 
     public decimal QuantityStepSize { get; private set; }
@@ -58,11 +58,15 @@ public class Instrument
     /// 68,000×0.0001=6.8 USDT
     /// </summary>
     public decimal MinNotional { get; private set; }
+
     public decimal MinPrice { get; private set; }
     public decimal MaxPrice { get; private set; }
 
     public long ToPriceTicks(decimal price) => checked((long)(price / TickSize));
+
     public long ToQuantityUnits(decimal quantity) => checked((long)(quantity / QuantityStepSize));
+
     public decimal Price(long ticks) => ticks * TickSize;
+
     public decimal Quantity(long units) => units * QuantityStepSize;
 }

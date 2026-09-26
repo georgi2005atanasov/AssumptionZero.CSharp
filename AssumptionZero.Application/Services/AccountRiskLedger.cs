@@ -3,12 +3,11 @@ using AssumptionZero.Domain.Entities;
 namespace AssumptionZero.Application.Services;
 
 /// <summary>Single-writer, account-wide balances and accepted but unacknowledged intents.</summary>
-public sealed class AccountRiskLedger
+public sealed class AccountRiskLedger(string[] assets)
 {
-    private readonly string[] assets;
-    private readonly decimal[] free;
-    private readonly decimal[] locked;
-    private readonly decimal[] reserved;
+    private readonly decimal[] free = new decimal[assets.Length];
+    private readonly decimal[] locked = new decimal[assets.Length];
+    private readonly decimal[] reserved = new decimal[assets.Length];
     private readonly Intent[] intents = new Intent[4_096];
     private long nextIntentId;
     public bool Ready { get; private set; }
@@ -19,14 +18,6 @@ public sealed class AccountRiskLedger
         public long Id;
         public int Asset;
         public decimal Amount;
-    }
-
-    public AccountRiskLedger(string[] assets)
-    {
-        this.assets = assets;
-        free = new decimal[assets.Length];
-        locked = new decimal[assets.Length];
-        reserved = new decimal[assets.Length];
     }
 
     public int FindAsset(ReadOnlySpan<char> asset)

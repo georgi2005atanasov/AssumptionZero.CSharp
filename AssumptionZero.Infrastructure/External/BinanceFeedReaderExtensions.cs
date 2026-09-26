@@ -5,7 +5,7 @@ namespace AssumptionZero.Infrastructure.External;
 
 public static class BinanceFeedReaderExtensions
 {
-    public static async Task PersistRecordedMessagesAsync(this BinanceFeedReader reader, string connectionString)
+    public static async Task PersistRecordedMessages(this BinanceFeedReader reader, string connectionString)
             {
                 await using var connection = new NpgsqlConnection(connectionString);
                 await connection.OpenAsync();

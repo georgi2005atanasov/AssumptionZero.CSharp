@@ -4,13 +4,24 @@ namespace AssumptionZero.Domain.InMemory;
 
 public sealed class MarketMakingStrategy : IStrategy
 {
-    public QuoteDecision Evaluate(Instrument instrument, in HotConfig config, in OrderBook book,
-        in SignalState signals, in InventoryState inventory, in WorkingOrders orders,
-        ref PricingState pricing, double adverseScore, decimal makerFeeRate,
-        decimal freeBase, decimal freeQuote)
+    public QuoteDecision Evaluate(
+        Instrument instrument,
+        in HotConfig config,
+        in OrderBook book,
+        in SignalState signals,
+        in InventoryState inventory,
+        in WorkingOrders orders,
+        ref PricingState pricing,
+        double adverseScore,
+        decimal makerFeeRate,
+        decimal freeBase,
+        decimal freeQuote)
     {
-        if (!book.IsSynchronized || book.BidCount < config.BookLevels || book.AskCount < config.BookLevels ||
-            inventory.MaxLongQuantity < inventory.CurrentQuantity || makerFeeRate < 0)
+        if (!book.IsSynchronized ||
+            book.BidCount < config.BookLevels ||
+            book.AskCount < config.BookLevels ||
+            inventory.MaxLongQuantity < inventory.CurrentQuantity ||
+            makerFeeRate < 0)
             return Invalid(orders);
 
         double weights = config.MicroWeight + config.MliWeight + config.OfiWeight +
@@ -24,8 +35,9 @@ public sealed class MarketMakingStrategy : IStrategy
         double mid = ((double)book.Bids[0].PriceTicks + book.Asks[0].PriceTicks) * 0.5;
         long deviation = inventory.CurrentQuantity - inventory.TargetQuantity;
         long lowerBound = -inventory.MaxShortQuantity;
-        double range = deviation >= 0 ? inventory.MaxLongQuantity - (double)inventory.TargetQuantity :
-            inventory.TargetQuantity - (double)lowerBound;
+        double range = deviation >= 0
+            ? inventory.MaxLongQuantity - (double)inventory.TargetQuantity
+            : inventory.TargetQuantity - (double)lowerBound;
         double z = range > 0 ? Math.Clamp(deviation / range, -1, 1) : 0;
         double volatility = Math.Clamp(signals.VolatilityTicks / config.VolatilityScaleTicks, 0, 1);
         double thinness = Math.Clamp(1 - signals.LiquidityRatio, 0, 1);
@@ -75,13 +87,17 @@ public sealed class MarketMakingStrategy : IStrategy
         pricing.TargetAskTicks = desiredSell > 0 ? ask : 0;
         pricing.TargetBidQuantity = desiredBuy;
         pricing.TargetAskQuantity = desiredSell;
-        return new QuoteDecision(pricing.TargetBidTicks, desiredBuy,
+        return new QuoteDecision(
+            pricing.TargetBidTicks,
+            desiredBuy,
             Action(orders.BidOrder, pricing.TargetBidTicks, desiredBuy, config.MinimumReplaceMoveTicks),
-            pricing.TargetAskTicks, desiredSell,
+            pricing.TargetAskTicks,
+            desiredSell,
             Action(orders.AskOrder, pricing.TargetAskTicks, desiredSell, config.MinimumReplaceMoveTicks));
     }
 
-    private static long Remaining(in WorkingOrder order) => order.IsActive ? Math.Max(0, order.Quantity - order.FilledQuantity) : 0;
+    private static long Remaining(in WorkingOrder order) =>
+        order.IsActive ? Math.Max(0, order.Quantity - order.FilledQuantity) : 0;
 
     private static bool ValidQuantity(Instrument instrument, long price, long quantity)
     {
@@ -100,7 +116,9 @@ public sealed class MarketMakingStrategy : IStrategy
         if (targetQuantity == 0) return current.IsActive ? QuoteAction.Cancel : QuoteAction.None;
         if (!current.IsActive) return QuoteAction.Place;
         return Math.Abs(targetPrice - current.PriceTicks) >= replaceTicks ||
-               targetQuantity != Remaining(current) ? QuoteAction.Replace : QuoteAction.Keep;
+               targetQuantity != Remaining(current)
+            ? QuoteAction.Replace
+            : QuoteAction.Keep;
     }
 
     private static QuoteDecision Invalid(in WorkingOrders orders) => new(0, 0,
