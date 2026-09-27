@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Text.Json;
 using AssumptionZero.Infrastructure.Benchmarking;
 using System.Net.WebSockets;
 using AssumptionZero.Application.Services;
@@ -335,7 +336,7 @@ public class TradingPipelineTests
     {
         var (runtime, _) = Runtime();
         var feed = new BinanceFeedReader("", ["BTCUSDT"], "ws://127.0.0.1/stream",
-            replay: true, logEvents: false, runtimes: [runtime]);
+            FeedMode.ReplayWithSnapshot, logEvents: false, runtimes: [runtime]);
         int decisions = 0;
         feed.DecisionProduced += (_, _) => decisions++;
         byte[][] frames = Enumerable.Range(0, 400)
@@ -354,7 +355,7 @@ public class TradingPipelineTests
     {
         var (runtime, _) = Runtime();
         var feed = new BinanceFeedReader("", ["BTCUSDT"], "ws://127.0.0.1/stream",
-            replay: true, logEvents: false, runtimes: [runtime]);
+            FeedMode.ReplayWithSnapshot, logEvents: false, runtimes: [runtime]);
         int decisions = 0;
         feed.DecisionProduced += (_, _) => decisions++;
         for (int i = 0; i < 101; i++) feed.ProcessBinaryFrame(Depth(10 + i, i * 10));
@@ -368,7 +369,7 @@ public class TradingPipelineTests
     }
 
     [TestMethod]
-    public void SyntheticReplayCalculatesForTwoProductsWithoutAllocationsAfterWarmup()
+    public void EstimatedBookReplayCalculatesForTwoProductsWithoutAllocationsAfterWarmup()
     {
         HotConfig config = new(bookLevels: 10);
         var ledger = new AccountRiskLedger(["BTC", "ETH", "USDT"]);
@@ -378,13 +379,13 @@ public class TradingPipelineTests
         ledger.SetBalance(2, 100_000, 0);
         ledger.CompleteSnapshot();
         var btc = new InstrumentRuntime(new Instrument(0, "BTCUSDT", "BTC", "USDT",
-            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, syntheticReplay: true);
+            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, estimateBookFromFeed: true);
         var eth = new InstrumentRuntime(new Instrument(1, "ETHUSDT", "ETH", "USDT",
-            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, syntheticReplay: true);
+            1, 1, 1, 100_000, 0), config, ledger, 100, 10_100, estimateBookFromFeed: true);
         btc.OnBalanceChanged();
         eth.OnBalanceChanged();
         var feed = new BinanceFeedReader("", ["BTCUSDT", "ETHUSDT"], "ws://127.0.0.1/stream",
-            replay: true, logEvents: false, runtimes: [btc, eth], syntheticReplay: true);
+            FeedMode.ReplayWithEstimatedBook, logEvents: false, runtimes: [btc, eth]);
         int btcDecisions = 0, ethDecisions = 0;
         feed.DecisionProduced += (runtime, _) =>
         {
@@ -433,7 +434,7 @@ public class TradingPipelineTests
     }
 
     [TestMethod]
-    public void SyntheticReplayCanStartFromDepthWhenNoTopQuoteWasRecorded()
+    public void EstimatedBookReplayCanStartFromDepthWhenNoTopQuoteWasRecorded()
     {
         var ledger = new AccountRiskLedger(["BTC", "USDT"]);
         ledger.BeginSnapshot(0);
@@ -441,10 +442,10 @@ public class TradingPipelineTests
         ledger.SetBalance(1, 100_000, 0);
         ledger.CompleteSnapshot();
         var runtime = new InstrumentRuntime(Instrument(), new HotConfig(bookLevels: 10),
-            ledger, 100, 10_100, syntheticReplay: true);
+            ledger, 100, 10_100, estimateBookFromFeed: true);
         runtime.OnBalanceChanged();
         var feed = new BinanceFeedReader("", ["BTCUSDT"], "ws://127.0.0.1/stream",
-            replay: true, logEvents: false, runtimes: [runtime], syntheticReplay: true);
+            FeedMode.ReplayWithEstimatedBook, logEvents: false, runtimes: [runtime]);
         feed.ProcessBinaryFrame(Depth(40, 0));
         Assert.IsTrue(runtime.OrderBook.IsSynchronized);
         Assert.AreEqual(40L, runtime.OrderBook.LastUpdateId);
@@ -453,7 +454,7 @@ public class TradingPipelineTests
     }
 
     [TestMethod]
-    public void SyntheticReplayUsesObservedQuantityScaleForLargeMarketQuotes()
+    public void EstimatedBookReplayUsesObservedQuantityScaleForLargeMarketQuotes()
     {
         var ledger = new AccountRiskLedger(["SHIB", "USDT"]);
         ledger.BeginSnapshot(0);
@@ -462,10 +463,10 @@ public class TradingPipelineTests
         ledger.CompleteSnapshot();
         var runtime = new InstrumentRuntime(new Instrument(0, "SHIBUSDT", "SHIB", "USDT",
                 1m, 1m, 1m, 1_000_000m, 0), new HotConfig(bookLevels: 10),
-            ledger, 100, 10_100, syntheticReplay: true);
+            ledger, 100, 10_100, estimateBookFromFeed: true);
         runtime.OnBalanceChanged();
         var feed = new BinanceFeedReader("", ["SHIBUSDT"], "ws://127.0.0.1/stream",
-            replay: true, logEvents: false, runtimes: [runtime], syntheticReplay: true);
+            FeedMode.ReplayWithEstimatedBook, logEvents: false, runtimes: [runtime]);
         const long bidMantissa = 2_676_897_829_200;
         feed.ProcessBinaryFrame(Quote("SHIBUSDT", 40, bidMantissa, 1_000_000,
             priceExponent: -8, qtyExponent: -2));
@@ -493,12 +494,12 @@ public class TradingPipelineTests
         {
             var (runtime, _) = Runtime();
             var reader = new BinanceFeedReader("", ["BTCUSDT"], url,
-                replay: true, logEvents: false, runtimes: [runtime]);
+                FeedMode.ReplayWithSnapshot, logEvents: false, runtimes: [runtime]);
             using var benchmark = new ReplayBenchmarkRecorder(4, 1, diagnostic: false);
             reader.Benchmark = benchmark;
             var decisions = new List<QuoteDecision>();
             reader.DecisionProduced += (_, decision) => decisions.Add(decision);
-            await reader.Start(executionMode: ExecutionMode.Replay).WaitAsync(TimeSpan.FromSeconds(10));
+            await reader.Start().WaitAsync(TimeSpan.FromSeconds(10));
             BenchmarkAppReport report = benchmark.Finish(true);
             Assert.AreEqual(4, report.ReceivedFrames);
             Assert.AreEqual(4, report.TotalDecisions);
@@ -527,10 +528,10 @@ public class TradingPipelineTests
         var (runtime, _) = Runtime();
         var feed = new BinanceFeedReader("", ["BTCUSDT"],
             server.Urls.Single().Replace("http://", "ws://") + "/stream",
-            replay: true, logEvents: false, runtimes: [runtime]);
+            FeedMode.ReplayWithSnapshot, logEvents: false, runtimes: [runtime]);
         using var benchmark = new ReplayBenchmarkRecorder(3, 1, diagnostic: false);
         feed.Benchmark = benchmark;
-        await feed.Start(executionMode: ExecutionMode.Replay).WaitAsync(TimeSpan.FromSeconds(10));
+        await feed.Start().WaitAsync(TimeSpan.FromSeconds(10));
         BenchmarkAppReport report = benchmark.Finish(true);
         Assert.AreEqual(3, report.ReceivedFrames);
         Assert.AreEqual(3, report.TotalDecisions);
@@ -660,6 +661,7 @@ public class TradingPipelineTests
             reportCompleted: _ => { });
         await server.StartAsync();
         string url = server.Urls.Single().Replace("http://", "ws://") + "/stream";
+        string reportPath = Path.Combine(Path.GetTempPath(), "az-replay-" + Guid.NewGuid().ToString("N") + ".json");
         using var process = new Process();
         process.StartInfo.FileName = DotnetExecutable();
         process.StartInfo.ArgumentList.Add(Path.Combine(directory,
@@ -668,16 +670,29 @@ public class TradingPipelineTests
         process.StartInfo.Environment["REPLAY_URL"] = url;
         process.StartInfo.Environment["REPLAY_FIXTURE"] = Path.Combine(directory,
             "AssumptionZero.App/bin/Release/net10.0/replay-fixture.json");
+        process.StartInfo.Environment["BENCHMARK_OUTPUT"] = reportPath;
+        process.StartInfo.Environment["BENCHMARK_EXPECTED_FRAMES"] = "120";
+        process.StartInfo.Environment["BENCHMARK_WARMUP_FRAMES"] = "0";
         process.StartInfo.RedirectStandardOutput = true;
         process.StartInfo.RedirectStandardError = true;
         process.StartInfo.UseShellExecute = false;
-        process.Start();
-        await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
-        string output = await process.StandardOutput.ReadToEndAsync();
-        string error = await process.StandardError.ReadToEndAsync();
-        Assert.AreEqual(0, process.ExitCode, error + output);
-        StringAssert.Contains(output, "Replay complete: 120 decisions, ");
-        Assert.IsFalse(output.Contains("120 decisions, 0 with", StringComparison.Ordinal));
+        try
+        {
+            process.Start();
+            await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
+            string output = await process.StandardOutput.ReadToEndAsync();
+            string error = await process.StandardError.ReadToEndAsync();
+            Assert.AreEqual(0, process.ExitCode, error + output);
+            StringAssert.Contains(output, "Replay complete: 120 decisions, ");
+            Assert.IsFalse(output.Contains("120 decisions, 0 with", StringComparison.Ordinal));
+            using JsonDocument report = JsonDocument.Parse(await File.ReadAllBytesAsync(reportPath));
+            Assert.IsTrue(report.RootElement.GetProperty("Completed").GetBoolean());
+            Assert.AreEqual(120, report.RootElement.GetProperty("ReceivedFrames").GetInt32());
+        }
+        finally
+        {
+            File.Delete(reportPath);
+        }
     }
 
     private static async Task<int> OpenSsl(params string[] arguments)

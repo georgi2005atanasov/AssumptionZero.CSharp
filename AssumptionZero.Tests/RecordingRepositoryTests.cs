@@ -57,7 +57,7 @@ public class RecordingRepositoryTests
 
             // Exercise the existing recorder's persistence code against the unchanged table definition.
             Guid captured = Guid.NewGuid();
-            var recorder = new BinanceFeedReader("test", [], "ws://127.0.0.1/stream");
+            var recorder = new BinanceFeedReader("test", [], "ws://127.0.0.1/stream", FeedMode.Capture);
             byte[] payload = WebSocketReplayTests.QuotePayload();
             recorder.recordedMessages.Writer.TryWrite(
                 new(captured, 1, 123, (short)WebSocketMessageType.Binary, payload));

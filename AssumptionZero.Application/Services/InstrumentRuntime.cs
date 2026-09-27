@@ -15,10 +15,10 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private WorkingOrders orders;
     private readonly AccountRiskLedger account;
     private readonly HotConfig config;
-    private readonly bool syntheticReplay;
-    private bool syntheticPrecisionInitialized;
-    private readonly BookLevel[]? syntheticBids;
-    private readonly BookLevel[]? syntheticAsks;
+    private readonly bool estimateBookFromFeed;
+    private bool estimatedPrecisionInitialized;
+    private readonly BookLevel[]? estimatedBids;
+    private readonly BookLevel[]? estimatedAsks;
     private readonly int baseAsset;
     private readonly int quoteAsset;
     private long pendingLastId;
@@ -42,24 +42,24 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public WorkingOrders WorkingOrders { get => orders; set => orders = value; }
     public IStrategy Strategy { get; set; }
     public bool Ready => account.Ready && book.IsSynchronized && memory.Warm && !memory.Faulted;
+    public bool EstimatesBookFromFeed => estimateBookFromFeed;
     public HotConfig Config => config;
     public bool BenchmarkStages { get; set; }
     public long LastSignalTicks { get; private set; }
     public long LastQuoteTicks { get; private set; }
-    public bool SyntheticReplay => syntheticReplay;
 
     public InstrumentRuntime(Instrument instrument, in HotConfig config, AccountRiskLedger account,
         long targetQuantity, long maxLongQuantity, long maxShortQuantity = 0, IStrategy? strategy = null,
-        bool syntheticReplay = false)
+        bool estimateBookFromFeed = false)
     {
         Instrument = instrument;
         this.config = config;
-        this.syntheticReplay = syntheticReplay;
-        if (syntheticReplay)
+        this.estimateBookFromFeed = estimateBookFromFeed;
+        if (estimateBookFromFeed)
         {
-            int syntheticLevels = Math.Max(config.BookLevels, 32);
-            syntheticBids = new BookLevel[syntheticLevels];
-            syntheticAsks = new BookLevel[syntheticLevels];
+            int estimatedLevels = Math.Max(config.BookLevels, 32);
+            estimatedBids = new BookLevel[estimatedLevels];
+            estimatedAsks = new BookLevel[estimatedLevels];
         }
         this.account = account;
         baseAsset = account.FindAsset(instrument.BaseAsset);
@@ -84,10 +84,10 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
                book.BidCount >= config.BookLevels && book.AskCount >= config.BookLevels;
     }
 
-    /// <summary>Choose synthetic units from this symbol's first observed SBE scales.</summary>
-    public void SetSyntheticPrecision(sbyte priceExponent, sbyte quantityExponent)
+    /// <summary>Choose estimated price and quantity units from the first observed SBE scales.</summary>
+    public void SetEstimatedBookPrecision(sbyte priceExponent, sbyte quantityExponent)
     {
-        if (!syntheticReplay || syntheticPrecisionInitialized) return;
+        if (!estimateBookFromFeed || estimatedPrecisionInitialized) return;
         decimal tick = DecimalPowerOfTen(priceExponent);
         decimal step = DecimalPowerOfTen(quantityExponent);
         Instrument original = Instrument;
@@ -101,13 +101,13 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         inventory.MaxLongQuantity = maxLong;
         inventory.MaxShortQuantity = 0;
         OnBalanceChanged();
-        syntheticPrecisionInitialized = true;
+        estimatedPrecisionInitialized = true;
     }
 
     private static decimal DecimalPowerOfTen(sbyte exponent)
     {
         if (exponent is < -28 or > 28)
-            throw new InvalidDataException($"Unsupported SBE exponent {exponent} for synthetic replay.");
+            throw new InvalidDataException($"Unsupported SBE exponent {exponent} for estimated replay book.");
         decimal value = 1m;
         if (exponent < 0)
             for (int i = 0; i < -exponent; i++) value /= 10m;
@@ -119,7 +119,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public bool BeginDepth(long firstId, long lastId)
     {
         diffOpen = false;
-        bool validSequence = syntheticReplay ?
+        bool validSequence = estimateBookFromFeed ?
             book.IsSynchronized && firstId > 0 && lastId >= firstId :
             book.CanApply(firstId, lastId);
         if (!validSequence) { book.Invalidate(); return false; }
@@ -133,27 +133,27 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         return true;
     }
 
-    /// <summary>Performance replay only: seed bounded depth from an observed top quote.</summary>
-    public bool BootstrapSyntheticBook(long bidPrice, long bidQuantity, long askPrice, long askQuantity,
+    /// <summary>Performance replay only: estimate bounded depth from an observed top quote.</summary>
+    public bool SeedEstimatedBook(long bidPrice, long bidQuantity, long askPrice, long askQuantity,
         long updateId)
     {
-        if (!syntheticReplay || book.IsSynchronized || updateId <= 0 || bidPrice <= syntheticBids!.Length ||
+        if (!estimateBookFromFeed || book.IsSynchronized || updateId <= 0 || bidPrice <= estimatedBids!.Length ||
             askPrice <= bidPrice || bidQuantity <= 0 || askQuantity <= 0) return false;
-        for (int i = 0; i < syntheticBids.Length; i++)
+        for (int i = 0; i < estimatedBids.Length; i++)
         {
-            syntheticBids[i] = new BookLevel { PriceTicks = bidPrice - i, Quantity = bidQuantity };
-            syntheticAsks![i] = new BookLevel { PriceTicks = askPrice + i, Quantity = askQuantity };
+            estimatedBids[i] = new BookLevel { PriceTicks = bidPrice - i, Quantity = bidQuantity };
+            estimatedAsks![i] = new BookLevel { PriceTicks = askPrice + i, Quantity = askQuantity };
         }
         observedBidPrice = bidPrice;
         observedBidQuantity = bidQuantity;
         observedAskPrice = askPrice;
         observedAskQuantity = askQuantity;
-        return LoadSnapshot(syntheticBids, syntheticAsks!, updateId);
+        return LoadSnapshot(estimatedBids, estimatedAsks!, updateId);
     }
 
-    public bool ObserveSyntheticDepth(bool bid, long price, long quantity, long updateId)
+    public bool ObserveDepthForEstimatedBook(bool bid, long price, long quantity, long updateId)
     {
-        if (!syntheticReplay || book.IsSynchronized || price <= 0 || quantity <= 0) return false;
+        if (!estimateBookFromFeed || book.IsSynchronized || price <= 0 || quantity <= 0) return false;
         if (bid)
         {
             if (price >= observedBidPrice) { observedBidPrice = price; observedBidQuantity = quantity; }
@@ -163,7 +163,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             observedAskPrice = price;
             observedAskQuantity = quantity;
         }
-        return BootstrapSyntheticBook(observedBidPrice, observedBidQuantity,
+        return SeedEstimatedBook(observedBidPrice, observedBidQuantity,
             observedAskPrice, observedAskQuantity, updateId);
     }
 

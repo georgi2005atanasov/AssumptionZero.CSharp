@@ -53,30 +53,27 @@ try
         case ExecutionMode.SeedData:
             await router.SeedData(
                 binanceApiKey,
-                mode,
                 connectionString,
                 symbols,
                 logEvents,
-                cancellation
+                cancellation.Token
             );
             break;
         case ExecutionMode.NormalExecution:
         {
             await router.NormalExecution(
-                mode,
                 symbols,
                 logEvents,
-                cancellation
+                cancellation.Token
             );
             break;
         }
         case ExecutionMode.Replay:
         {
             await router.Replay(
-                mode,
                 symbols,
                 logEvents,
-                cancellation
+                cancellation.Token
             );
             break;
         }

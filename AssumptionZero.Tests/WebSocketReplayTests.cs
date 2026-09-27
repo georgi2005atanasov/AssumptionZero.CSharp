@@ -148,13 +148,13 @@ public class WebSocketReplayTests
         var recording = new Recording(Guid.NewGuid(), [new(1, 0, WebSocketMessageType.Binary, QuotePayload())]);
         await using var server = await RunningServer.Start(recording);
         var quotes = new List<BestQuote>();
-        var replay = new BinanceFeedReader("", [], server.Uri.ToString(), replay: true, logEvents: false);
+        var replay = new BinanceFeedReader("", [], server.Uri.ToString(), FeedMode.ReplayWithSnapshot, logEvents: false);
         replay.QuoteReceived += quotes.Add;
-        await replay.Start(executionMode: ExecutionMode.Replay).WaitAsync(TimeSpan.FromSeconds(10));
+        await replay.Start().WaitAsync(TimeSpan.FromSeconds(10));
         Assert.IsTrue((await server.Report()).Completed);
-        var live = new BinanceFeedReader("test-key", [], server.Uri.ToString(), logEvents: false);
+        var live = new BinanceFeedReader("test-key", [], server.Uri.ToString(), FeedMode.Live, logEvents: false);
         live.QuoteReceived += quotes.Add;
-        await Assert.ThrowsExceptionAsync<IOException>(() => live.Start(executionMode: ExecutionMode.NormalExecution));
+        await Assert.ThrowsExceptionAsync<IOException>(() => live.Start());
         await server.Report();
         Assert.AreEqual(2, quotes.Count);
         Assert.AreEqual(quotes[0], quotes[1]);
@@ -187,14 +187,14 @@ public class WebSocketReplayTests
         {
             using var output = new StringWriter();
             Console.SetOut(output);
-            var quiet = new BinanceFeedReader("", [], server.Uri.ToString(), replay: true);
-            await quiet.Start(executionMode: ExecutionMode.Replay);
+            var quiet = new BinanceFeedReader("", [], server.Uri.ToString(), FeedMode.ReplayWithSnapshot);
+            await quiet.Start();
             await server.Report();
             Assert.IsFalse(output.ToString().Contains("DEPTH"));
 
             output.GetStringBuilder().Clear();
-            var verbose = new BinanceFeedReader("", [], server.Uri.ToString(), replay: true, logEvents: true);
-            await verbose.Start(executionMode: ExecutionMode.Replay);
+            var verbose = new BinanceFeedReader("", [], server.Uri.ToString(), FeedMode.ReplayWithSnapshot, logEvents: true);
+            await verbose.Start();
             await server.Report();
             string replayOutput = output.ToString();
             StringAssert.Contains(replayOutput, "DEPTH BTCUSDT 40->42 bids=1 asks=1");
@@ -202,9 +202,9 @@ public class WebSocketReplayTests
             StringAssert.Contains(replayOutput, "ASK CHANGE price=101 qty=0");
 
             output.GetStringBuilder().Clear();
-            var live = new BinanceFeedReader("test", [], server.Uri.ToString(), logEvents: true);
+            var live = new BinanceFeedReader("test", [], server.Uri.ToString(), FeedMode.Live, logEvents: true);
             await Assert.ThrowsExceptionAsync<IOException>(() =>
-                live.Start(executionMode: ExecutionMode.NormalExecution));
+                live.Start());
             await server.Report();
             Assert.AreEqual(replayOutput, output.ToString());
         }

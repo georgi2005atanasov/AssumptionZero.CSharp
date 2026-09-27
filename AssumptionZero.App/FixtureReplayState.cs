@@ -6,7 +6,7 @@ using AssumptionZero.Domain.InMemory;
 
 namespace AssumptionZero.App;
 
-internal static class ReplayFixture
+internal static class FixtureReplayState
 {
     public static (string[] Symbols, InstrumentRuntime[] Runtimes) Load(string path, in HotConfig config)
     {

@@ -24,9 +24,16 @@ The initial directional score uses microprice imbalance, weighted book imbalance
 The system supports two types of input:
 
 - **Binance Spot Testnet SBE stream:** Live depth updates arrive over WebSocket in Simple Binary Encoding (SBE). This gives the system a real external data source and lets it be tested against changing market conditions.
-- **Simulator and replay:** The simulator sends a finished recording over a local WebSocket at its recorded rate, including its original bursts and gaps. Synthetic traffic and speed controls are not implemented.
+- **Simulator and replay:** The simulator sends a finished recording over a local WebSocket with its original bursts and gaps. The standalone replay runs at 1×; benchmark commands can change the playback speed. There is no general-purpose synthetic traffic generator.
 
 The SBE stream is used because it provides frequent binary market data updates. Replay provides a repeatable input sequence; testing maximum capacity with generated traffic is future work.
+
+The application has three `EXECUTION_MODE` values: `SeedData` records live market messages, `NormalExecution` processes live messages, and `Replay` processes a simulator recording. In `Replay`, the market messages are always recorded data. `REPLAY_FIXTURE` selects how the application starts:
+
+| `REPLAY_FIXTURE` | Initial account and order book | Use |
+| --- | --- | --- |
+| Set to a matching file | Supplied balances, instrument rules, and synchronized book snapshot | Inspect decisions for the recorded starting state |
+| Unset | Estimated balances, rules, and book built from the first market updates | Measure processing performance; quote values are not historical results |
 
 Live tests show how the application behaves with a real network connection. Simulator tests are the main basis for repeatable C# versus Rust comparisons.
 

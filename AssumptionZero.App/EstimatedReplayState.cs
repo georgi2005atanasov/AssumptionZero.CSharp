@@ -4,8 +4,8 @@ using AssumptionZero.Domain.InMemory;
 
 namespace AssumptionZero.App;
 
-/// <summary>Deterministic, invented account and filters for market-only performance recordings.</summary>
-internal static class BenchmarkReplayFixture
+/// <summary>Deterministic account and starting book estimates for market-only performance recordings.</summary>
+internal static class EstimatedReplayState
 {
     // Placeholder units; the first SBE quote/depth for each symbol supplies its own exponents.
     private const decimal Grid = 1m;
@@ -19,7 +19,7 @@ internal static class BenchmarkReplayFixture
         for (int i = 0; i < symbols.Length; i++)
         {
             if (!symbols[i].EndsWith("USDT", StringComparison.Ordinal))
-                throw new ArgumentException("Benchmark replay requires USDT pairs.", nameof(symbols));
+                throw new ArgumentException("Estimated replay state requires USDT pairs.", nameof(symbols));
             assets[i + 1] = symbols[i][..^4];
         }
 
@@ -37,7 +37,7 @@ internal static class BenchmarkReplayFixture
             long target = instrument.ToQuantityUnits(100m);
             long maxLong = checked(target + config.BaseQuantity * 10);
             var runtime = new InstrumentRuntime(instrument, config, ledger, target, maxLong,
-                syntheticReplay: true);
+                estimateBookFromFeed: true);
             runtime.OnBalanceChanged();
             runtimes[i] = runtime;
         }
