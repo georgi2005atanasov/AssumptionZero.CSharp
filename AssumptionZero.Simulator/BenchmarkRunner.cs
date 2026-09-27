@@ -72,7 +72,7 @@ public static class BenchmarkRunner
         else
         {
             string connection = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
-                "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
+                "Host=172.17.0.3;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
             recording = await new RecordingRepository(connection).LoadAsync(Guid.Parse(options.Recording));
         }
         string appPath = FindApp();

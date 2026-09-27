@@ -5,7 +5,7 @@ public static class AppConstants
     /// <summary>
     /// For the sake of testing, I would just put it here.
     /// </summary>
-    public const string DefaultPgConnectionString = "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
+    public const string DefaultPgConnectionString = "Host=172.17.0.3;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
 
     /// <summary>
     /// Never put real key here - this key is for testing purposes

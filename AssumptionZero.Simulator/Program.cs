@@ -36,7 +36,7 @@ try
     if (!demo)
     {
         string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
-                                  "Host=172.17.0.2;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
+                                  "Host=172.17.0.3;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
         repository = new RecordingRepository(connectionString);
     }
     if (list)
