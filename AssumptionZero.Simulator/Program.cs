@@ -1,72 +1,75 @@
-﻿using AssumptionZero.Simulator;
+using AssumptionZero.Simulator;
+using System.Globalization;
 
 if (args.Length == 0 || args[0] is "--help" or "-h")
 {
     Console.WriteLine("""
-                      Usage:
-                        AssumptionZero.Simulator demo [http://127.0.0.1:5080]
-                        AssumptionZero.Simulator list
-                        AssumptionZero.Simulator replay <recording-id> [http://127.0.0.1:5080]
-                        AssumptionZero.Simulator benchmark run|sweep --recording UUID|demo --out DIR
-                          --p99-limit-us N --replay-p99-lateness-us N [--fixture PATH]
-                          [--speed N|--max-speed N] [--diagnostic]
-                      demo needs no database. Set PG_CONNECTION for list, replay, and recorded benchmarks.
-                      Benchmarks without --fixture use synthetic account, filters, and starting books.
-                      Replay sends the entire recording at 1x over /stream; stream query parameters are ignored.
-                      """);
+        Usage:
+          AssumptionZero.Simulator list
+          AssumptionZero.Simulator demo [listen-url] [--speed N]
+          AssumptionZero.Simulator replay RECORDING_UUID [listen-url]
+            [--max-messages N | --all] [--speed N | --target-duration-seconds N]
+          AssumptionZero.Simulator benchmark run|sweep|compare --recording UUID|demo --out DIR
+            [--max-messages N | --all] [--speed N | --target-duration-seconds 60]
+            [--language csharp|rust] [--rust-app PATH] [--csharp-app PATH] [--fixture PATH]
+            [--p99-limit-us 1000] [--replay-p99-lateness-us 100] [--max-speed 16]
+            [--smoke] [--trace] [--diagnostic] [--app-cpus CPU-LIST] [--fragment-size N]
+        Omitted limits select the whole recording. Standalone replay defaults to 1x;
+        benchmarks target 60 seconds. Smoke defaults to 1000x and never sets capacity.
+        PostgreSQL is needed only to load/list recordings. Demo needs no database.
+        """);
     return args.Length == 0 ? 1 : 0;
 }
-
 using var cancellation = new CancellationTokenSource();
-Console.CancelKeyPress += (_, eventArgs) =>
-{
-    eventArgs.Cancel = true;
-    cancellation.Cancel();
-};
-
+Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
 try
 {
-    if (args[0] == "benchmark") return await BenchmarkRunner.RunAsync(args[1..]);
-    bool list = args is ["list"];
-    bool demo = args is ["demo"] or ["demo", _];
-    bool replay = args.Length is 2 or 3 && args[0] == "replay" && Guid.TryParse(args[1], out _);
-    if (!list && !demo && !replay)
-        throw new ArgumentException("Use 'demo', 'list', or 'replay <recording-id> [listen-url]'.");
-    RecordingRepository? repository = null;
-    if (!demo)
-    {
-        string connectionString = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
-                                  "Host=172.17.0.3;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
-        repository = new RecordingRepository(connectionString);
-    }
-    if (list)
+    if (args[0] == "benchmark") return await BenchmarkRunner.RunAsync(args[1..], cancellation.Token);
+    string connection = Environment.GetEnvironmentVariable("PG_CONNECTION") ?? AssumptionZero.AppDefaults.ConnectionString;
+    var repository = new RecordingRepository(connection);
+    if (args is ["list"])
     {
         Console.WriteLine("Recording ID                           Messages       Payload bytes       Duration (ns)");
-        foreach (var recording in await repository!.ListAsync(cancellation.Token))
-            Console.WriteLine(
-                $"{recording.Id} {recording.MessageCount,12} {recording.PayloadBytes,19} {recording.DurationNanoseconds,19}");
+        foreach (var r in await repository.ListAsync(cancellation.Token))
+            Console.WriteLine($"{r.Id} {r.MessageCount,12} {r.PayloadBytes,19} {r.DurationNanoseconds,19}");
         return 0;
     }
-
-    var loaded = demo ? DemoRecording.Create() :
-        await repository!.LoadAsync(Guid.Parse(args[1]), cancellation.Token);
-    string url = demo ? (args.Length == 2 ? args[1] : "http://127.0.0.1:5080") :
-        (args.Length == 3 ? args[2] : "http://127.0.0.1:5080");
-    await using var app = ReplayServer.Create(loaded, url);
+    bool demo = args[0] == "demo";
+    if (!demo && (args[0] != "replay" || args.Length < 2 || !Guid.TryParse(args[1], out _)))
+        throw new ArgumentException("Use demo, list, replay UUID, or benchmark. See --help.");
+    int start = demo ? 1 : 2;
+    string url = "http://127.0.0.1:5080";
+    if (start < args.Length && !args[start].StartsWith("--")) url = args[start++];
+    int? max = null; bool all = false; double? speed = null, duration = null;
+    var seen = new HashSet<string>();
+    for (int i = start; i < args.Length; i++)
+    {
+        string key = args[i];
+        if (!seen.Add(key)) throw new ArgumentException($"Duplicate option {key}.");
+        if (key == "--all") { all = true; continue; }
+        if (i + 1 >= args.Length) throw new ArgumentException($"Missing value for {key}.");
+        string value = args[++i];
+        switch (key)
+        {
+            case "--max-messages": max = int.Parse(value, CultureInfo.InvariantCulture); break;
+            case "--speed": speed = double.Parse(value, CultureInfo.InvariantCulture); break;
+            case "--target-duration-seconds": duration = double.Parse(value, CultureInfo.InvariantCulture); break;
+            default: throw new ArgumentException($"Unknown option {key}.");
+        }
+    }
+    if (max is <= 0 || all && max.HasValue) throw new ArgumentException("Use --max-messages N (> 0) or --all, not both.");
+    if (speed.HasValue && duration.HasValue || speed.HasValue && (!double.IsFinite(speed.Value) || speed <= 0 || speed > 1000) ||
+        duration.HasValue && (!double.IsFinite(duration.Value) || duration <= 0)) throw new ArgumentException("Invalid replay timing options.");
+    Recording recording;
+    if (demo) { var d = DemoRecording.Create(); recording = new(d.Id, max.HasValue ? d.Messages.Take(max.Value) : d.Messages); }
+    else recording = await repository.LoadAsync(Guid.Parse(args[1]), cancellation.Token, max);
+    double rate = speed ?? (duration.HasValue ? Math.Clamp(recording.DurationNanoseconds / 1e9 / duration.Value, .000001, 1000) : 1);
+    await using var app = ReplayServer.Create(recording, url, speed: rate);
     await app.StartAsync(cancellation.Token);
-    Console.WriteLine(
-        $"Loaded {loaded.Id}: {loaded.Messages.Count} messages, {loaded.PayloadBytes} payload bytes, {loaded.DurationNanoseconds} ns.");
-    Console.WriteLine($"Listening on {url}/stream. One active client; each connection replays from the beginning.");
+    Console.WriteLine($"Loaded {recording.Id}: {recording.Messages.Count} messages, {recording.PayloadBytes} bytes, speed {rate:R}x.");
+    Console.WriteLine($"Listening on {url}/stream. Each connection starts at sequence 1; one active client.");
     await app.WaitForShutdownAsync(cancellation.Token);
     return 0;
 }
-catch (OperationCanceledException) when (cancellation.IsCancellationRequested)
-{
-    Console.WriteLine("Stopped.");
-    return 0;
-}
-catch (Exception exception)
-{
-    Console.Error.WriteLine(exception.Message);
-    return 1;
-}
+catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { Console.WriteLine("Stopped."); return 130; }
+catch (Exception exception) { Console.Error.WriteLine(exception.Message); return 1; }

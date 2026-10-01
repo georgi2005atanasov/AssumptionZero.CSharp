@@ -78,12 +78,17 @@ public sealed class ExecutionRouter
             Environment.GetEnvironmentVariable("BENCHMARK_DIAGNOSTIC") == "1");
         feed.Benchmark = benchmark;
 
+        string? tracePath = Environment.GetEnvironmentVariable("CORRECTNESS_TRACE");
+        using StreamWriter? trace = tracePath is null ? null : new StreamWriter(tracePath);
         int decisions = 0, actionable = 0, readyDecisions = 0;
         long allocationStart = 0, allocated = -1;
         bool measureAllocations = EnvironmentVariables.Get(EnvKeys.MEASURE_ALLOCATIONS) == "1";
         feed.DecisionProduced += (runtime, decision) =>
         {
             decisions++;
+            if (trace is not null) trace.WriteLine(System.Text.Json.JsonSerializer.Serialize(new long[] {
+                runtime.Instrument.Id, decision.BidPriceTicks, decision.BidQuantity, (long)decision.BidAction,
+                decision.AskPriceTicks, decision.AskQuantity, (long)decision.AskAction }));
             if (decision.BidAction is QuoteAction.Place or QuoteAction.Replace or QuoteAction.Cancel ||
                 decision.AskAction is QuoteAction.Place or QuoteAction.Replace or QuoteAction.Cancel)
                 actionable++;
@@ -101,7 +106,8 @@ public sealed class ExecutionRouter
         }
         finally
         {
-            if (benchmark is not null) benchmark.Finish(completed).Write(benchmarkOutput!);
+            if (benchmark is not null) (benchmark.Finish(completed) with {
+                FinalStateHash = DiscreteStateHash.Compute(state.Runtimes) }).Write(benchmarkOutput!);
         }
 
         Console.WriteLine($"Replay complete: {decisions} decisions, {actionable} with place/replace/cancel intents.");

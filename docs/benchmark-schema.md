@@ -1,6 +1,6 @@
-# Benchmark report format (version 4)
+# Benchmark report format (version 5)
 
-`comparison.json` contains `SchemaVersion`, `RecordingId`, `HighestPassingSpeed` (nullable), and an array of `Speeds`. Each speed has five `Runs`, a `Passed` verdict, a failure reason, and `MeasurementWallOverheadPercent`. Every run is also saved as `run-N-summary.json`; both use the same version 4 JSON shape and PascalCase property names. Rust should emit these field names and units so the two implementations can be compared directly. `ReplayStateSource` is `synthetic` when no fixture is supplied and `fixture` otherwise. `FixtureSha256` is null for synthetic runs. Synthetic replay uses invented account, filter, and starting book state; its quote values are not historical results. C# selects each symbol's price tick and quantity step as 10 raised to the SBE exponents in its first quote or depth frame, then seeds its book from market observations. Compare C# and Rust decision hashes only when both use equivalent starting state and quote units.
+`comparison.json` contains `SchemaVersion`, `RecordingId`, `HighestPassingSpeed` (nullable), and an array of `Speeds`. Each speed has five `Runs`, a `Passed` verdict, a failure reason, and `MeasurementWallOverheadPercent`. Every run is also saved as `run-N-summary.json`; both use the same version 5 JSON shape and PascalCase property names. The shared coordinator emits these field names and units for both C# and Rust. `ReplayStateSource` is `synthetic` when no fixture is supplied and `fixture` otherwise. `FixtureSha256` is null for synthetic runs. Synthetic replay uses invented account, filter, and starting book state; its quote values are not historical results. C# selects each symbol's price tick and quantity step as 10 raised to the SBE exponents in its first quote or depth frame, then seeds its book from market observations. Compare C# and Rust decision hashes only when both use equivalent starting state and quote units.
 
 ## Latency and throughput
 
@@ -26,4 +26,59 @@ index,type,bytes,template,send_ticks,receive_ticks,end_ticks,last_decision_ticks
 
 ## Decision equivalence
 
-`DecisionHash` covers every decision in recording order, including warm-up. Start with 64-bit FNV offset `14695981039346656037`. For each decision, mix these signed integer values in order: instrument ID, bid price ticks, bid quantity, bid action, ask price ticks, ask quantity, ask action. Each mix is `hash = (hash XOR value_as_unsigned_64_bits) * 1099511628211`, wrapping at 64 bits. Actions are `None=0`, `Place=1`, `Keep=2`, `Replace=3`, `Cancel=4`. Render the result as 16 lowercase hexadecimal digits. A fixture-free run checks decision repeatability across C# runs. A future Rust comparison needs matching synthetic initialization or a shared fixture before comparing decision hashes.
+`DecisionHash` covers every decision in recording order, including warm-up. Start with 64-bit FNV offset `14695981039346656037`. For each decision, mix these signed integer values in order: instrument ID, bid price ticks, bid quantity, bid action, ask price ticks, ask quantity, ask action. Each mix is `hash = (hash XOR value_as_unsigned_64_bits) * 1099511628211`, wrapping at 64 bits. Actions are `None=0`, `Place=1`, `Keep=2`, `Replace=3`, `Cancel=4`. Render the result as 16 lowercase hexadecimal digits. A fixture-free run checks decision repeatability across C# runs. The Rust application uses matching synthetic initialization or the same shared fixture. Both hashes must match before performance ratios are published.
+
+
+## Version 5 additions and compatibility
+
+The summary schema is 5; the application-to-coordinator frame report remains
+schema 3 with additive optional properties. Existing per-frame CSV columns and
+nanosecond percentile definitions are unchanged. Scripts and launch procedures
+are documented in [testing.md](testing.md).
+
+Each run adds `RunKind` (`smoke`, `diagnostic`, or `measurement`), nullable
+`CapacityPassed`, `FinalStateHash`, `DatasetSha256`, nullable
+`RequestedMaxMessages`, `P99LimitNanoseconds`, `ReplayLatenessLimitNanoseconds`,
+`Build`, and `Host`. `SentFrames` is the actual selected count. Unlimited selection
+sets `RequestedMaxMessages` to null; a larger limit than the source selects all
+available messages. `Passed` is a functional verdict for smoke runs; only
+`CapacityPassed` represents a measured capacity verdict. `HighestPassingSpeed`
+is always null for smoke/diagnostic runs.
+
+Dataset SHA-256 consumes each selected message in order: signed little-endian
+int64 sequence, signed little-endian int64 elapsed nanoseconds, one byte message
+type, signed little-endian int64 payload length, and exact payload bytes. The
+recording UUID is recorded separately. Original offsets, including initial silence,
+are retained. SQL prefix selection does not change the recording.
+
+`Application.AllocatorAllocatedBytes` and `AllocatorAllocatedBytesPerFrame` count
+requested Rust allocator bytes, including reallocations, across the process in
+the measured window. `Application.AllocationScope` labels the counter. These
+allocator fields are null for C#. Managed heap/allocation and GC fields are null
+for Rust; empty GC diagnostic arrays mean no GC instrumentation. `ServerGc`,
+`GcLatencyMode`, and logical CPU count are reported by the measured application,
+not inferred from the simulator. CPU/RSS fields retain their existing units.
+
+`Build` identifies the executable hash, compiler/runtime and available Git
+revision/status. Script builds also provide a build-time provenance manifest
+containing source-tree and binary hashes. `Host` records readable CPU topology,
+affinity and governor settings, relevant .NET environment overrides, and perf
+permissions. Missing build manifests remain null rather than invented.
+
+The final-state hash uses the same FNV mix as `DecisionHash`. Mix runtime count,
+account-ready flag, then each instrument in configured order: instrument ID,
+last book update ID, synchronized/warm/faulted flags (0/1), current/target/max-long/
+max-short inventory, reserved buy/sell units; bid count and every bid price/quantity;
+ask count and every ask price/quantity; bid then ask order ID, price, quantity,
+filled quantity, numeric status and active flag. Status values are PendingNew=0,
+PendingCancel=1, New=2, PartiallyFilled=3, Filled=4, Cancelled=5, Rejected=6,
+Expired=7. Floating signal intermediates are checked by reference tests; the hash
+covers final discrete state and is computed outside the measured frame path.
+
+`paired-comparison.json` contains both language results and their correctness gate.
+Ratios require complete equivalent output, sufficient measured duration/sample
+count, and acceptable sender fidelity in every run. A P99 service-limit failure
+still permits valid observed performance ratios, but does not pass capacity.
+Smoke/trace/GC-diagnostic runs publish no ratios. Raw per-run results always remain
+available. Ratios are CSharp/Rust with min/median/max over five runs per language;
+allocation counters of different scopes are not divided into a misleading ratio.

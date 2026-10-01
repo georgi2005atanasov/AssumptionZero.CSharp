@@ -48,6 +48,11 @@ public class RecordingRepositoryTests
             var summaries = await repository.ListAsync();
             Assert.AreEqual(2, summaries.Count);
             Assert.AreEqual(new RecordingSummary(first, 2, 2, 200), summaries.Single(row => row.Id == first));
+            var prefix = await repository.LoadAsync(first, maxMessages: 1);
+            Assert.AreEqual(1, prefix.Messages.Count);
+            Assert.AreEqual(100L, prefix.DurationNanoseconds);
+            Assert.AreEqual(2, (await repository.LoadAsync(first, maxMessages: 300000)).Messages.Count);
+            await Assert.ThrowsExceptionAsync<ArgumentOutOfRangeException>(() => repository.LoadAsync(first, maxMessages: 0));
             var loaded = await repository.LoadAsync(first);
             CollectionAssert.AreEqual(new long[] { 1, 2 }, loaded.Messages.Select(row => row.SequenceNumber).ToArray());
             CollectionAssert.AreEqual(new long[] { 100, 200 },

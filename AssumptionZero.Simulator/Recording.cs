@@ -57,15 +57,17 @@ public sealed class RecordingRepository(string connectionString)
         return result;
     }
 
-    public async Task<Recording> LoadAsync(Guid id, CancellationToken cancellationToken = default)
+    public async Task<Recording> LoadAsync(Guid id, CancellationToken cancellationToken = default, int? maxMessages = null)
     {
+        if (maxMessages is <= 0) throw new ArgumentOutOfRangeException(nameof(maxMessages));
         await using var connection = new NpgsqlConnection(connectionString);
         await connection.OpenAsync(cancellationToken);
         await using var command = new NpgsqlCommand("""
             SELECT sequence_number, elapsed_ns, message_type, payload
-            FROM recorded_messages WHERE recording_id = $1 ORDER BY sequence_number
+            FROM recorded_messages WHERE recording_id = $1 ORDER BY sequence_number LIMIT $2
             """, connection);
         command.Parameters.AddWithValue(id);
+        command.Parameters.Add(new NpgsqlParameter { NpgsqlDbType = NpgsqlTypes.NpgsqlDbType.Integer, Value = (object?)maxMessages ?? DBNull.Value });
         await using var reader = await command.ExecuteReaderAsync(cancellationToken);
         var messages = new List<ReplayMessage>();
         while (await reader.ReadAsync(cancellationToken))

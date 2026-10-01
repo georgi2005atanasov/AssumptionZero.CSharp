@@ -41,6 +41,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public InventoryState Inventory { get => inventory; set => inventory = value; }
     public WorkingOrders WorkingOrders { get => orders; set => orders = value; }
     public IStrategy Strategy { get; set; }
+    public bool AccountReady => account.Ready;
     public bool Ready => account.Ready && book.IsSynchronized && memory.Warm && !memory.Faulted;
     public bool EstimatesBookFromFeed => estimateBookFromFeed;
     public HotConfig Config => config;

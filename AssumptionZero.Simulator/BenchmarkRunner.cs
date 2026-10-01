@@ -15,7 +15,7 @@ public sealed record PerfCounters(string Scope, long? Cycles, long? Instructions
 public sealed record BenchmarkRunSummary(int SchemaVersion, string Language, string RecordingId,
     string ReplayStateSource, string? FixtureSha256,
     double Speed, long ClockFrequency, string Machine, string OperatingSystem, string Runtime, string BuildConfiguration,
-    int LogicalCpus, bool ServerGc, string GcLatencyMode, int WarmupFrames,
+    int LogicalCpus, bool? ServerGc, string? GcLatencyMode, int WarmupFrames,
     bool Diagnostic, bool Complete, bool ReplayFidelityPassed, bool DurationPassed, bool SampleCountPassed,
     bool P99Passed, bool Passed, string DecisionHash,
     long AchievedFramesPerSecond, long AchievedDecisionsPerSecond,
@@ -24,7 +24,18 @@ public sealed record BenchmarkRunSummary(int SchemaVersion, string Language, str
     LatencySummary ProcessingNanoseconds, LatencySummary SendToProcessingNanoseconds,
     TimingStatistics ReplaySendLatenessNanoseconds, TimingStatistics ReplaySendDurationNanoseconds,
     BenchmarkAppOverview Application, PerfCounters HardwareCounters,
-    ThroughputWindow[] PerSecond, double ProcessWallSeconds, string? Error);
+    ThroughputWindow[] PerSecond, double ProcessWallSeconds, string? Error)
+{
+    public string RunKind { get; init; } = "measurement";
+    public bool? CapacityPassed { get; init; }
+    public string? FinalStateHash { get; init; }
+    public string DatasetSha256 { get; init; } = "";
+    public int? RequestedMaxMessages { get; init; }
+    public long P99LimitNanoseconds { get; init; }
+    public long ReplayLatenessLimitNanoseconds { get; init; }
+    public object? Build { get; init; }
+    public object? Host { get; init; }
+}
 public sealed record SpeedSummary(double Speed, bool Passed, string? Failure,
     double MeasurementWallOverheadPercent, BenchmarkRunSummary[] Runs);
 public sealed record SweepSummary(int SchemaVersion, string RecordingId, double? HighestPassingSpeed,
@@ -55,281 +66,332 @@ public static class BenchmarkAnalysis
 
 public static class BenchmarkRunner
 {
-    private sealed record Options(bool Sweep, string Recording, string? Fixture, string Output,
-        double Speed, double MaxSpeed, long P99LimitNs, long ReplayLatenessLimitNs, bool Diagnostic);
+    public sealed record Options(string Command, string Recording, string? Fixture, string Output,
+        double? Speed, double MaxSpeed, double TargetSeconds, long P99LimitNs, long ReplayLatenessLimitNs,
+        bool Diagnostic, bool Smoke, bool Trace, int? MaxMessages, string Language, string? RustApp, string? CSharpApp,
+        string? AppCpus, int FragmentSize);
+    private sealed record Target(string Language, string Executable, string[] Arguments, string Binary, string Runtime, object Build);
+    private static readonly JsonSerializerOptions JsonOptions = new() { WriteIndented = true };
 
-    public static async Task<int> RunAsync(string[] args)
+    public static Options Parse(string[] args)
     {
-        Options options = Parse(args);
-        Directory.CreateDirectory(options.Output);
-        string? fixture = options.Fixture is null ? null : Path.GetFullPath(options.Fixture);
-        if (fixture is not null && !File.Exists(fixture))
-            throw new FileNotFoundException("Replay fixture was not found.", fixture);
-        string? fixtureHash = fixture is null ? null :
-            Convert.ToHexString(SHA256.HashData(await File.ReadAllBytesAsync(fixture))).ToLowerInvariant();
-        Recording recording;
-        if (options.Recording == "demo") recording = DemoRecording.Create();
-        else
-        {
-            string connection = Environment.GetEnvironmentVariable("PG_CONNECTION") ??
-                "Host=172.17.0.3;Database=assumption_zero;Username=postgres;Password=mysecretpassword;Trust Server Certificate=true;";
-            recording = await new RecordingRepository(connection).LoadAsync(Guid.Parse(options.Recording));
-        }
-        string appPath = FindApp();
-        string[] perfEvents = await ProbePerf();
-        var results = new List<SpeedSummary>();
-        double? highest = null;
-        string? expectedHash = null;
-        async Task<SpeedSummary> Measure(double speed)
-        {
-            SpeedSummary result;
-            try
-            {
-                result = await MeasureSpeed(recording, options, speed, fixture, fixtureHash, appPath, perfEvents);
-                string? hash = result.Runs.FirstOrDefault()?.DecisionHash;
-                if (hash is not null)
-                {
-                    expectedHash ??= hash;
-                    if (hash != expectedHash)
-                        result = result with { Passed = false, Failure = "decision hash differs from first measured speed" };
-                }
-            }
-            catch (Exception exception)
-            {
-                result = new SpeedSummary(speed, false, exception.Message, 0, []);
-            }
-            results.Add(result);
-            if (result.Passed && (!highest.HasValue || speed > highest)) highest = speed;
-            Console.WriteLine($"{speed:0.###}x: {(options.Diagnostic ? "DIAGNOSTIC" : result.Passed ? "PASS" : "FAIL")} {result.Failure}");
-            return result;
-        }
-        if (!options.Sweep) await Measure(options.Speed);
-        else
-        {
-            double low = 0, high = 0, speed = 1;
-            while (speed <= options.MaxSpeed)
-            {
-                SpeedSummary result = await Measure(speed);
-                if (!result.Passed) { high = speed; break; }
-                low = speed;
-                if (speed == options.MaxSpeed) break;
-                speed = Math.Min(options.MaxSpeed, speed * 2);
-            }
-            if (low > 0 && high > 0)
-                for (int i = 0; i < 8 && (high - low) / low > .1; i++)
-                {
-                    double mid = (low + high) / 2;
-                    if ((await Measure(mid)).Passed) low = mid; else high = mid;
-                }
-        }
-        var summary = new SweepSummary(4, recording.Id.ToString(), highest, results.ToArray());
-        await File.WriteAllTextAsync(Path.Combine(options.Output, "comparison.json"),
-            JsonSerializer.Serialize(summary, new JsonSerializerOptions { WriteIndented = true }));
-        return options.Diagnostic || highest.HasValue ? 0 : 2;
-    }
-
-    private static Options Parse(string[] args)
-    {
-        if (args.Length == 0 || args[0] is not ("run" or "sweep"))
-            throw new ArgumentException("benchmark run|sweep --recording UUID|demo --out DIR " +
-                "--p99-limit-us N --replay-p99-lateness-us N [--fixture PATH] " +
-                "[--speed N|--max-speed N] [--diagnostic]");
+        if (args.Length == 0 || args[0] is not ("run" or "sweep" or "compare"))
+            throw new ArgumentException("benchmark run|sweep|compare --recording UUID|demo --out DIR [--language csharp|rust] " +
+                "[--rust-app PATH] [--max-messages N|--all] [--speed N|--target-duration-seconds N] [--smoke] [--trace]");
+        string[] flags = ["--all", "--smoke", "--diagnostic", "--trace"];
+        string[] values = ["--recording", "--out", "--fixture", "--speed", "--max-speed", "--target-duration-seconds",
+            "--p99-limit-us", "--replay-p99-lateness-us", "--max-messages", "--language", "--rust-app", "--csharp-app", "--app-cpus", "--fragment-size"];
         var map = new Dictionary<string, string>(StringComparer.Ordinal);
         for (int i = 1; i < args.Length; i++)
         {
-            if (args[i] == "--diagnostic") { map[args[i]] = "1"; continue; }
-            if (!args[i].StartsWith("--", StringComparison.Ordinal) || i + 1 >= args.Length)
-                throw new ArgumentException($"Invalid option {args[i]}.");
-            map[args[i]] = args[++i];
+            string key = args[i];
+            if (map.ContainsKey(key)) throw new ArgumentException($"Duplicate option {key}.");
+            if (flags.Contains(key)) map.Add(key, "1");
+            else if (values.Contains(key) && i + 1 < args.Length) map.Add(key, args[++i]);
+            else throw new ArgumentException($"Unknown option or missing value: {key}.");
         }
-        string Required(string key) => map.TryGetValue(key, out string? value) ? value :
-            throw new ArgumentException($"{key} is required.");
-        double Number(string key, double fallback) => map.TryGetValue(key, out string? value) ?
-            double.Parse(value, CultureInfo.InvariantCulture) : fallback;
-        double speed = Number("--speed", 1), maxSpeed = Number("--max-speed", 16);
-        double p99Us = double.Parse(Required("--p99-limit-us"), CultureInfo.InvariantCulture);
-        double replayUs = double.Parse(Required("--replay-p99-lateness-us"), CultureInfo.InvariantCulture);
-        if (!double.IsFinite(speed) || !double.IsFinite(maxSpeed) || speed <= 0 || speed > 1_000 ||
-            maxSpeed < 1 || maxSpeed > 1_000 ||
-            !double.IsFinite(p99Us) || !double.IsFinite(replayUs) || p99Us <= 0 || replayUs <= 0)
-            throw new ArgumentOutOfRangeException(nameof(args), "Speeds and latency limits must be positive and finite.");
-        return new(args[0] == "sweep", Required("--recording"),
-            map.TryGetValue("--fixture", out string? fixture) ? fixture : null,
-            Path.GetFullPath(Required("--out")), speed, maxSpeed,
-            checked((long)Math.Ceiling(p99Us * 1_000)), checked((long)Math.Ceiling(replayUs * 1_000)),
-            map.ContainsKey("--diagnostic"));
+        string Required(string key) => map.GetValueOrDefault(key) ?? throw new ArgumentException($"{key} is required.");
+        double Number(string key, double fallback) => map.TryGetValue(key, out var value) ? double.Parse(value, CultureInfo.InvariantCulture) : fallback;
+        bool smoke = map.ContainsKey("--smoke");
+        double? speed = map.ContainsKey("--speed") ? Number("--speed", 1) : smoke && !map.ContainsKey("--target-duration-seconds") ? 1000 : null;
+        double max = Number("--max-speed", 16), target = Number("--target-duration-seconds", 60);
+        double p99 = Number("--p99-limit-us", 1000), late = Number("--replay-p99-lateness-us", 100);
+        if (map.ContainsKey("--speed") && map.ContainsKey("--target-duration-seconds")) throw new ArgumentException("Choose speed or target duration.");
+        if (speed.HasValue && (!double.IsFinite(speed.Value) || speed <= 0 || speed > 1000) ||
+            !double.IsFinite(max) || max < 1 || max > 1000 || !double.IsFinite(target) || target <= 0 ||
+            !double.IsFinite(p99) || p99 <= 0 || !double.IsFinite(late) || late <= 0)
+            throw new ArgumentException("Speeds and limits must be positive finite values (speed <= 1000).");
+        int? limit = map.TryGetValue("--max-messages", out var count) ? int.Parse(count, CultureInfo.InvariantCulture) : null;
+        if (limit is <= 0 || limit.HasValue && map.ContainsKey("--all")) throw new ArgumentException("Use --max-messages N (> 0) or --all, not both.");
+        string language = map.GetValueOrDefault("--language", "csharp").ToLowerInvariant();
+        if (language is not ("csharp" or "rust")) throw new ArgumentException("Language must be csharp or rust.");
+        if (map.ContainsKey("--diagnostic") && (args[0] == "compare" || language == "rust")) throw new ArgumentException("GC diagnostics apply only to C#.");
+        if (args[0] == "sweep" && (smoke || map.ContainsKey("--speed") || map.ContainsKey("--target-duration-seconds"))) throw new ArgumentException("Sweep chooses its own speeds and cannot be a smoke test.");
+        int fragment = map.TryGetValue("--fragment-size", out var fragmentValue) ? int.Parse(fragmentValue, CultureInfo.InvariantCulture) : 0;
+        if (fragment < 0) throw new ArgumentException("Fragment size cannot be negative.");
+        return new(args[0], Required("--recording"), map.GetValueOrDefault("--fixture"), Path.GetFullPath(Required("--out")),
+            speed, max, target, checked((long)Math.Ceiling(p99 * 1000)), checked((long)Math.Ceiling(late * 1000)),
+            map.ContainsKey("--diagnostic"), smoke, map.ContainsKey("--trace"), limit, language,
+            map.GetValueOrDefault("--rust-app"), map.GetValueOrDefault("--csharp-app"), map.GetValueOrDefault("--app-cpus"), fragment);
     }
 
-    private static string FindApp()
+    public static async Task<int> RunAsync(string[] args, CancellationToken cancellationToken = default)
+    {
+        Options o = Parse(args);
+        if (Directory.Exists(o.Output) && Directory.EnumerateFileSystemEntries(o.Output).Any())
+            throw new IOException("Output directory must be empty; do not overwrite an earlier experiment.");
+        Directory.CreateDirectory(o.Output);
+        string? fixture = o.Fixture is null ? null : Path.GetFullPath(o.Fixture);
+        string? fixtureHash = fixture is null ? null : Hash(File.ReadAllBytes(fixture));
+        Recording recording;
+        if (o.Recording == "demo")
+        {
+            var demo = DemoRecording.Create();
+            recording = new Recording(demo.Id, o.MaxMessages.HasValue ? demo.Messages.Take(o.MaxMessages.Value) : demo.Messages);
+        }
+        else recording = await new RecordingRepository(Environment.GetEnvironmentVariable("PG_CONNECTION") ??
+            AssumptionZero.AppDefaults.ConnectionString).LoadAsync(Guid.Parse(o.Recording), cancellationToken, o.MaxMessages);
+        string datasetHash = DatasetHash(recording);
+        Console.WriteLine($"Selected {recording.Messages.Count} messages, {recording.PayloadBytes} bytes; original duration {recording.DurationNanoseconds / 1e9:0.###} s.");
+        Target[] targets = o.Command == "compare" ? [await ResolveTarget("csharp", o), await ResolveTarget("rust", o)] : [await ResolveTarget(o.Language, o)];
+        string[] perf = o.Smoke ? [] : await ProbePerf();
+        object host = new { Settings = HostMetadata(o.AppCpus), CpuTopology = await Command("lscpu", "--json") };
+        var summaries = targets.ToDictionary(t => t.Language, _ => new List<SpeedSummary>());
+        var expected = new Dictionary<string, (string Decision, string? State)>();
+        bool equivalent = true;
+        async Task<bool> Measure(double speed)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Console.WriteLine($"Replay speed {speed:R}x ({recording.DurationNanoseconds / speed / 1e9:0.###} s scheduled).");
+            var runs = targets.ToDictionary(t => t.Language, _ => new List<BenchmarkRunSummary>());
+            var baselines = new Dictionary<string, double>();
+            foreach (Target t in targets)
+            {
+                if (o.Smoke) { baselines[t.Language] = 0; continue; }
+                var baseline = await RunOnce(recording, speed, fixture, t, null, 0, o, [], cancellationToken);
+                if (baseline.ExitCode != 0 || baseline.Replay?.Completed != true)
+                    throw new InvalidOperationException($"{t.Language} uninstrumented baseline failed: {baseline.Error}");
+                baselines[t.Language] = baseline.WallSeconds;
+            }
+            int warmup = Math.Min(recording.Messages.Count - 1, (int)Math.Ceiling(recording.Messages.Count * .1));
+            int repetitions = o.Smoke ? 1 : 5;
+            for (int n = 1; n <= repetitions; n++)
+            {
+                // Alternate which language goes first; never run consumers simultaneously.
+                foreach (Target t in n % 2 == 1 ? targets : targets.Reverse())
+                {
+                    string directory = Path.Combine(o.Output, t.Language, $"speed-{speed.ToString("R", CultureInfo.InvariantCulture)}");
+                    Directory.CreateDirectory(directory);
+                    string prefix = Path.Combine(directory, $"run-{n}");
+                    var once = await RunOnce(recording, speed, fixture, t, prefix, warmup, o, perf, cancellationToken);
+                    if (once.App is null || once.Replay is null)
+                        throw new InvalidOperationException($"{t.Language} run {n} did not produce reports: {once.Error}");
+                    var app = once.App; var replay = once.Replay;
+                    if (app.SchemaVersion != 3 || app.ClockFrequency != Stopwatch.Frequency)
+                        throw new InvalidDataException("App report schema or monotonic clock frequency differs from simulator.");
+                    if (app.BuildConfiguration != "Release") throw new InvalidDataException("Measured application must be a Release build.");
+                    var (send, processing) = BenchmarkAnalysis.Summarize(app.Frames, replay.SendStartTicks, warmup, replay.SentMessages, app.ClockFrequency);
+                    bool complete = once.ExitCode == 0 && app.Completed && replay.Completed &&
+                        app.ReceivedFrames == recording.Messages.Count && app.Frames.Length == recording.Messages.Count && replay.SentMessages == recording.Messages.Count &&
+                        app.Frames.Select((f, i) => f.Index == i + 1 && f.Bytes == recording.Messages[i].Payload.Length && f.MessageType == recording.Messages[i].MessageType).All(x => x);
+                    bool fidelity = replay.SendStartLateness.P99 <= o.ReplayLatenessLimitNs;
+                    bool duration = app.MeasuredDurationNanoseconds >= 30_000_000_000L, samples = app.MeasuredFrames >= 10_000;
+                    bool p99 = send.Count > 0 && send.P99 <= o.P99LimitNs && processing.P99 <= o.P99LimitNs;
+                    bool diagnostic = o.Diagnostic || o.Trace;
+                    bool capacity = complete && fidelity && duration && samples && p99 && !diagnostic && !o.Smoke;
+                    bool smokePassed = complete && app.TotalDecisions > 0 && !string.IsNullOrEmpty(app.FinalStateHash);
+                    long Rate(long count) => app.MeasuredDurationNanoseconds == 0 ? 0 : (long)(count * 1e9 / app.MeasuredDurationNanoseconds);
+                    var summary = new BenchmarkRunSummary(5, t.Language, recording.Id.ToString(), fixture is null ? "synthetic" : "fixture", fixtureHash,
+                        speed, app.ClockFrequency, Environment.MachineName, RuntimeInformation.OSDescription, t.Runtime, "Release", app.LogicalCpus,
+                        app.ServerGc, app.GcLatencyMode,
+                        warmup, diagnostic, complete, fidelity, duration, samples, p99, o.Smoke ? smokePassed : capacity, app.DecisionHash,
+                        Rate(app.MeasuredFrames), Rate(app.MeasuredDecisions), replay.SentMessages, replay.SentBytes,
+                        replay.ExpectedDurationNanoseconds, replay.ActualDurationNanoseconds, send, app.ReceiveToDecisionNanoseconds,
+                        app.ProcessingNanoseconds, processing, replay.SendStartLateness, replay.SendDuration, BenchmarkAppOverview.From(app), once.Perf,
+                        Windows(app, warmup), once.WallSeconds, complete ? null : $"exit={once.ExitCode}; {once.Error}")
+                    {
+                        RunKind = o.Smoke ? "smoke" : diagnostic ? "diagnostic" : "measurement", CapacityPassed = o.Smoke || diagnostic ? null : capacity,
+                        FinalStateHash = app.FinalStateHash, DatasetSha256 = datasetHash, RequestedMaxMessages = o.MaxMessages,
+                        P99LimitNanoseconds = o.P99LimitNs, ReplayLatenessLimitNanoseconds = o.ReplayLatenessLimitNs, Build = t.Build, Host = host
+                    };
+                    runs[t.Language].Add(summary);
+                    await WriteJson(prefix + "-summary.json", summary);
+                    Console.WriteLine($"{t.Language} run {n}: {app.ReceivedFrames} frames, {app.TotalDecisions} decisions, hash {app.DecisionHash}, complete={complete}");
+                }
+            }
+            foreach (Target t in targets)
+            {
+                var rs = runs[t.Language];
+                bool same = rs.Select(r => (r.DecisionHash, r.FinalStateHash)).Distinct().Count() == 1 && rs.All(r => r.FinalStateHash is not null);
+                var identity = (rs[0].DecisionHash, rs[0].FinalStateHash);
+                if (expected.TryGetValue(t.Language, out var prior)) same &= prior == identity;
+                else expected[t.Language] = identity;
+                bool passed = rs.All(r => r.Passed) && same;
+                string? failure = passed ? null : string.Join(", ", new[] {
+                    !same ? "decision/final-state mismatch" : null, rs.Any(r => !r.Complete) ? "incomplete" : null,
+                    o.Smoke && rs.Any(r => r.Application.TotalDecisions == 0) ? "no decisions" : null,
+                    !o.Smoke && rs.Any(r => !r.ReplayFidelityPassed) ? "replay lateness" : null,
+                    !o.Smoke && rs.Any(r => !r.DurationPassed) ? "under 30 s" : null,
+                    !o.Smoke && rs.Any(r => !r.SampleCountPassed) ? "under 10000 frames" : null,
+                    !o.Smoke && rs.Any(r => !r.P99Passed) ? "P99 limit" : null,
+                    !o.Smoke && (o.Diagnostic || o.Trace) ? "diagnostic runs cannot set capacity" : null }.Where(x => x is not null));
+                double baseline = baselines[t.Language];
+                summaries[t.Language].Add(new(speed, passed, failure, baseline <= 0 ? 0 : (rs.Average(r => r.ProcessWallSeconds) / baseline - 1) * 100, rs.ToArray()));
+                Console.WriteLine($"{t.Language} {speed:0.###}x: {(passed ? "PASS" : "FAIL")} {failure}");
+            }
+            if (targets.Length == 2)
+            {
+                var all = runs.Values.SelectMany(x => x).ToArray();
+                equivalent &= all.All(r => r.Complete && r.FinalStateHash is not null) && all.Select(r => (r.DecisionHash, r.FinalStateHash)).Distinct().Count() == 1;
+            }
+            return targets.All(t => summaries[t.Language][^1].Passed);
+        }
+        if (o.Command != "sweep") await Measure(o.Speed ?? Math.Clamp(recording.DurationNanoseconds / 1e9 / o.TargetSeconds, .000001, 1000));
+        else
+        {
+            double low = 0, high = 0, speed = 1;
+            while (speed <= o.MaxSpeed)
+            {
+                if (!await Measure(speed)) { high = speed; break; }
+                low = speed;
+                if (speed == o.MaxSpeed) break;
+                speed = Math.Min(o.MaxSpeed, speed * 2);
+            }
+            for (int i = 0; i < 8 && low > 0 && high > 0 && (high - low) / low > .1; i++)
+            {
+                double mid = (low + high) / 2;
+                if (await Measure(mid)) low = mid; else high = mid;
+            }
+        }
+        foreach (Target t in targets)
+        {
+            var speeds = summaries[t.Language];
+            var summary = new SweepSummary(5, recording.Id.ToString(), o.Smoke || o.Trace || o.Diagnostic ? null :
+                speeds.Where(s => s.Passed).Select(s => (double?)s.Speed).Max(), speeds.ToArray());
+            string dir = Path.Combine(o.Output, t.Language); Directory.CreateDirectory(dir);
+            await WriteJson(Path.Combine(dir, "comparison.json"), summary);
+            if (targets.Length == 1) await WriteJson(Path.Combine(o.Output, "comparison.json"), summary);
+        }
+        if (targets.Length == 2)
+        {
+            var cs = summaries["CSharp"][0].Runs; var rust = summaries["Rust"][0].Runs;
+            bool valid = equivalent && !o.Smoke && !o.Trace && cs.Concat(rust).All(r => r.ReplayFidelityPassed && r.DurationPassed && r.SampleCountPassed);
+            object? ratios = valid ? ComparisonMetrics(cs, rust) : null;
+            await WriteJson(Path.Combine(o.Output, "paired-comparison.json"), new { SchemaVersion = 5, RecordingId = recording.Id, DatasetSha256 = datasetHash,
+                ActualMessages = recording.Messages.Count, RequestedMaxMessages = o.MaxMessages, Equivalent = equivalent,
+                PerformanceComparisonValid = valid, RunKind = o.Smoke ? "smoke" : o.Trace ? "diagnostic" : "measurement", Metrics = ratios,
+                Languages = summaries });
+            await File.WriteAllTextAsync(Path.Combine(o.Output, "report.md"), $"# C# / Rust comparison\n\n" +
+                $"Messages: {recording.Messages.Count}; dataset SHA-256: `{datasetHash}`.\n\n" +
+                $"Decision and final-state equivalence: **{equivalent}**. Performance comparison valid: **{valid}**.\n\n" +
+                (valid ? "Ratios are CSharp/Rust: above 1 favors Rust for latency/CPU/memory; below 1 favors Rust for throughput. Per-language min/median/max describe run variation.\n\n```json\n" + JsonSerializer.Serialize(ratios, JsonOptions) + "\n```\n" :
+                    "No performance ratios are published for smoke/diagnostic runs, correctness failures, short samples, or inadequate sender fidelity. Inspect per-run reports for reasons.\n") +
+                "\nA fixed-speed pass establishes that tested load, not maximum capacity. Managed and allocator allocations are different measures; compare their labelled raw values.\n");
+        }
+        return equivalent && (!o.Smoke && (o.Diagnostic || o.Trace) ? summaries.Values.SelectMany(x => x).SelectMany(x => x.Runs).All(r => r.Complete) : summaries.Values.All(x => x.Any(s => s.Passed))) ? 0 : 2;
+    }
+
+    private static object ComparisonMetrics(BenchmarkRunSummary[] cs, BenchmarkRunSummary[] rust)
+    {
+        var selectors = new Dictionary<string, Func<BenchmarkRunSummary, double>> {
+            ["SendToDecisionP99Ns"] = r => r.SendToDecisionNanoseconds.P99, ["ReceiveToDecisionP99Ns"] = r => r.ReceiveToDecisionNanoseconds.P99,
+            ["SendToProcessingP99Ns"] = r => r.SendToProcessingNanoseconds.P99, ["ProcessingP99Ns"] = r => r.ProcessingNanoseconds.P99,
+            ["DecodeP99Ns"] = r => r.Application.DecodeNanoseconds.P99, ["BookP99Ns"] = r => r.Application.BookNanoseconds.P99,
+            ["SignalP99Ns"] = r => r.Application.SignalNanoseconds.P99, ["QuoteP99Ns"] = r => r.Application.QuoteNanoseconds.P99,
+            ["FramesPerSecond"] = r => r.AchievedFramesPerSecond, ["DecisionsPerSecond"] = r => r.AchievedDecisionsPerSecond,
+            ["CpuNanosecondsPerFrame"] = r => r.Application.CpuNanosecondsPerFrame, ["ResidentBytes"] = r => r.Application.ResidentBytes,
+            ["PeakResidentBytes"] = r => r.Application.PeakResidentBytes };
+        return selectors.ToDictionary(k => k.Key, k => {
+            double[] a = cs.Select(k.Value).Order().ToArray(), b = rust.Select(k.Value).Order().ToArray();
+            return new { CSharp = new { Minimum = a[0], Median = a[a.Length / 2], Maximum = a[^1] },
+                Rust = new { Minimum = b[0], Median = b[b.Length / 2], Maximum = b[^1] },
+                CSharpOverRust = b[b.Length / 2] == 0 ? (double?)null : a[a.Length / 2] / b[b.Length / 2] };
+        });
+    }
+    public static string DatasetHash(Recording recording)
+    {
+        using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+        Span<byte> bytes = stackalloc byte[25];
+        foreach (var m in recording.Messages)
+        {
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(bytes, m.SequenceNumber);
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(bytes[8..], m.ElapsedNanoseconds);
+            bytes[16] = (byte)m.MessageType;
+            System.Buffers.Binary.BinaryPrimitives.WriteInt64LittleEndian(bytes[17..], m.Payload.Length);
+            hash.AppendData(bytes); hash.AppendData(m.Payload);
+        }
+        return Convert.ToHexString(hash.GetHashAndReset()).ToLowerInvariant();
+    }
+    private static string Hash(byte[] bytes) => Convert.ToHexString(SHA256.HashData(bytes)).ToLowerInvariant();
+    private static Task WriteJson(string path, object value) => File.WriteAllTextAsync(path, JsonSerializer.Serialize(value, JsonOptions));
+    private static async Task<Target> ResolveTarget(string language, Options o)
     {
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../.."));
-        string path = Path.Combine(root, "AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll");
-        if (!File.Exists(path)) throw new FileNotFoundException("Build the solution in Release first.", path);
-        return path;
+        string binary = language == "csharp" ? o.CSharpApp ?? Path.Combine(root, "AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll") :
+            o.RustApp ?? throw new ArgumentException("--rust-app is required for Rust or compare.");
+        binary = Path.GetFullPath(binary);
+        if (!File.Exists(binary)) throw new FileNotFoundException("Build the Release application first.", binary);
+        string dotnet = Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ??
+            (Path.GetFileNameWithoutExtension(Environment.ProcessPath) == "dotnet" ? Environment.ProcessPath! : "dotnet");
+        string runtime = language == "csharp" ? RuntimeInformation.FrameworkDescription : await Command(binary, "--version");
+        string source = language == "csharp" ? root : Path.GetFullPath(Path.Combine(Path.GetDirectoryName(binary)!, "../.."));
+        object build = new { BinarySha256 = Hash(File.ReadAllBytes(binary)), SourceRevision = await Command("git", "-C", source, "rev-parse", "HEAD"),
+            SourceStatus = await Command("git", "-C", source, "status", "--porcelain"), BuildManifest = ReadOptional(binary + ".build.json"),
+            Compiler = language == "csharp" ? await Command(dotnet, "--version") : runtime };
+        return new(language == "csharp" ? "CSharp" : "Rust", language == "csharp" ? dotnet : binary,
+            language == "csharp" ? [binary] : [], binary, runtime, build);
     }
-
-    private static async Task<SpeedSummary> MeasureSpeed(Recording recording, Options options, double speed,
-        string? fixture, string? fixtureHash, string appPath, string[] perfEvents)
+    private static async Task<string> Command(string command, params string[] args)
     {
-        string directory = Path.Combine(options.Output, $"speed-{speed.ToString("0.###", CultureInfo.InvariantCulture)}");
-        Directory.CreateDirectory(directory);
-        OnceResult baseline = await RunOnce(recording, speed, fixture, appPath, null, 0, false, []);
-        if (baseline.ExitCode != 0 || baseline.Replay?.Completed != true)
-            throw new InvalidOperationException($"Uninstrumented baseline failed: {baseline.Error}");
-        double baselineWall = baseline.WallSeconds;
-        var runs = new List<BenchmarkRunSummary>();
-        int warmup = Math.Min(recording.Messages.Count - 1, (int)Math.Ceiling(recording.Messages.Count * .1));
-        for (int i = 1; i <= 5; i++)
-        {
-            string prefix = Path.Combine(directory, $"run-{i}");
-            var result = await RunOnce(recording, speed, fixture, appPath, prefix, warmup,
-                options.Diagnostic, perfEvents);
-            if (result.App is null || result.Replay is null)
-                throw new InvalidOperationException($"Benchmark run {i} did not produce reports: {result.Error}");
-            var app = result.App;
-            var replay = result.Replay;
-            if (app.SchemaVersion != 3 || app.DecodeNanoseconds is null || app.BookNanoseconds is null ||
-                app.SignalNanoseconds is null || app.QuoteNanoseconds is null)
-                throw new InvalidDataException("The app benchmark report version does not match the runner.");
-            if (app.ClockFrequency != Stopwatch.Frequency)
-                throw new InvalidDataException("Simulator and app have different monotonic clock frequencies.");
-            (LatencySummary sendLatency, LatencySummary allFrameLatency) = BenchmarkAnalysis.Summarize(
-                app.Frames, replay.SendStartTicks, warmup, replay.SentMessages, Stopwatch.Frequency);
-            bool complete = result.ExitCode == 0 && app.Completed && replay.Completed &&
-                app.ReceivedFrames == recording.Messages.Count && replay.SentMessages == recording.Messages.Count;
-            bool fidelity = replay.SendStartLateness.P99 <= options.ReplayLatenessLimitNs;
-            bool duration = app.MeasuredDurationNanoseconds >= 30_000_000_000L;
-            bool sampleCount = app.MeasuredFrames >= 10_000;
-            bool p99 = sendLatency.Count > 0 && sendLatency.P99 <= options.P99LimitNs &&
-                allFrameLatency.P99 <= options.P99LimitNs;
-            bool passed = complete && fidelity && duration && sampleCount && p99 && !options.Diagnostic;
-            long achieved = app.MeasuredDurationNanoseconds == 0 ? 0 :
-                (long)(app.MeasuredFrames * 1_000_000_000.0 / app.MeasuredDurationNanoseconds);
-            long decisionsPerSecond = app.MeasuredDurationNanoseconds == 0 ? 0 :
-                (long)(app.MeasuredDecisions * 1_000_000_000.0 / app.MeasuredDurationNanoseconds);
-            string? error = complete ? null : $"exit={result.ExitCode}; sent={replay.SentMessages}; received={app.ReceivedFrames}; {result.Error}";
-            var summary = new BenchmarkRunSummary(4, "CSharp", recording.Id.ToString(),
-                fixture is null ? "synthetic" : "fixture", fixtureHash,
-                speed, app.ClockFrequency, Environment.MachineName, RuntimeInformation.OSDescription,
-                RuntimeInformation.FrameworkDescription, "Release", Environment.ProcessorCount,
-                GCSettings.IsServerGC, GCSettings.LatencyMode.ToString(), warmup,
-                options.Diagnostic, complete, fidelity, duration, sampleCount, p99, passed,
-                app.DecisionHash, achieved, decisionsPerSecond, replay.SentMessages, replay.SentBytes,
-                replay.ExpectedDurationNanoseconds, replay.ActualDurationNanoseconds,
-                sendLatency, app.ReceiveToDecisionNanoseconds, app.ProcessingNanoseconds,
-                allFrameLatency, replay.SendStartLateness, replay.SendDuration,
-                BenchmarkAppOverview.From(app), result.Perf,
-                Windows(app, warmup), result.WallSeconds, error);
-            runs.Add(summary);
-            await File.WriteAllTextAsync(prefix + "-summary.json", JsonSerializer.Serialize(summary,
-                new JsonSerializerOptions { WriteIndented = true }));
-        }
-        bool sameDecisions = runs.Select(r => r.DecisionHash).Distinct().Count() == 1;
-        bool allPassed = runs.All(r => r.Passed) && sameDecisions;
-        double overhead = baselineWall <= 0 ? 0 : (runs.Average(r => r.ProcessWallSeconds) / baselineWall - 1) * 100;
-        string? failure = allPassed ? null : !sameDecisions ? "decision hashes differ" :
-            string.Join(", ", new[]
-            {
-                runs.Any(r => !r.Complete) ? "incomplete" : null,
-                runs.Any(r => !r.ReplayFidelityPassed) ? "replay lateness" : null,
-                runs.Any(r => !r.DurationPassed) ? "under 30 s" : null,
-                runs.Any(r => !r.SampleCountPassed) ? "under 10000 frames" : null,
-                runs.Any(r => !r.P99Passed) ? "P99 limit" : null,
-                options.Diagnostic ? "diagnostic runs cannot set capacity" : null
-            }.Where(x => x is not null));
-        return new SpeedSummary(speed, allPassed, failure, overhead, runs.ToArray());
+        try { using var p = new Process { StartInfo = new ProcessStartInfo(command) { RedirectStandardOutput = true, RedirectStandardError = true } };
+            foreach (string arg in args) p.StartInfo.ArgumentList.Add(arg);
+            p.Start(); var stdout = p.StandardOutput.ReadToEndAsync(); var stderr = p.StandardError.ReadToEndAsync();
+            await p.WaitForExitAsync(); await stderr; return p.ExitCode == 0 ? (await stdout).Trim() : "unavailable";
+        } catch { return "unavailable"; }
     }
-
+    private static string? ReadOptional(string path) { try { return File.ReadAllText(path); } catch { return null; } }
+    private static object HostMetadata(string? appCpus) => new {
+        ApplicationCpuSet = appCpus, SimulatorStatus = ReadOptional("/proc/self/status")?.Split('\n').Where(s => s.StartsWith("Cpus_allowed_list:") || s.StartsWith("Mems_allowed_list:")).ToArray(),
+        CpuModel = ReadOptional("/proc/cpuinfo")?.Split('\n').FirstOrDefault(s => s.StartsWith("model name")),
+        Governor = ReadOptional("/sys/devices/system/cpu/cpu0/cpufreq/scaling_governor"),
+        PerfEventParanoid = ReadOptional("/proc/sys/kernel/perf_event_paranoid"),
+        DotnetTieredPgo = Environment.GetEnvironmentVariable("DOTNET_TieredPGO"), DotnetServerGc = Environment.GetEnvironmentVariable("DOTNET_gcServer"),
+        DotnetProcessorCount = Environment.GetEnvironmentVariable("DOTNET_PROCESSOR_COUNT") };
     private static ThroughputWindow[] Windows(BenchmarkAppReport app, int warmup)
     {
         if (app.MeasuredFrames == 0) return [];
-        long origin = app.Frames[warmup].ReceiveTicks;
-        var windows = new List<ThroughputWindow>();
-        for (int i = warmup; i < app.Frames.Length; i++)
-        {
-            FrameSample frame = app.Frames[i];
-            int second = (int)((frame.ReceiveTicks - origin) / app.ClockFrequency);
+        long origin = app.Frames[warmup].ReceiveTicks; var windows = new List<ThroughputWindow>();
+        for (int i = warmup; i < app.Frames.Length; i++) {
+            FrameSample f = app.Frames[i]; int second = (int)((f.ReceiveTicks - origin) / app.ClockFrequency);
             while (windows.Count <= second) windows.Add(new(windows.Count, 0, 0, 0));
-            ThroughputWindow old = windows[second];
-            windows[second] = old with { Frames = old.Frames + 1, Bytes = old.Bytes + frame.Bytes,
-                Decisions = old.Decisions + frame.Decisions };
-        }
-        return windows.ToArray();
+            var old = windows[second]; windows[second] = old with { Frames = old.Frames + 1, Bytes = old.Bytes + f.Bytes, Decisions = old.Decisions + f.Decisions };
+        } return windows.ToArray();
     }
-
-    private sealed record OnceResult(BenchmarkAppReport? App, ReplayReport? Replay, PerfCounters Perf,
-        double WallSeconds, int ExitCode, string? Error);
-
-    private static async Task<OnceResult> RunOnce(Recording recording, double speed, string? fixture,
-        string appPath, string? prefix, int warmup, bool diagnostic, string[] perfEvents)
+    private sealed record OnceResult(BenchmarkAppReport? App, ReplayReport? Replay, PerfCounters Perf, double WallSeconds, int ExitCode, string? Error);
+    private static async Task<OnceResult> RunOnce(Recording recording, double speed, string? fixture, Target target,
+        string? prefix, int warmup, Options o, string[] perfEvents, CancellationToken cancellationToken)
     {
-        var reportSource = new TaskCompletionSource<ReplayReport>(TaskCreationOptions.RunContinuationsAsynchronously);
-        await using var server = ReplayServer.Create(recording, "http://127.0.0.1:0",
-            report => reportSource.TrySetResult(report), speed: speed);
-        await server.StartAsync();
+        var source = new TaskCompletionSource<ReplayReport>(TaskCreationOptions.RunContinuationsAsynchronously);
+        await using var server = ReplayServer.Create(recording, "http://127.0.0.1:0", r => source.TrySetResult(r), o.FragmentSize, speed);
+        await server.StartAsync(cancellationToken);
         string url = server.Urls.Single().Replace("http://", "ws://") + "/stream";
-        string dotnet = Environment.ProcessPath ?? "dotnet";
-        string? perfPath = prefix is null ? null : prefix + "-perf.csv";
-        bool usePerf = perfEvents.Length > 0;
-        using var process = new Process();
-        var start = process.StartInfo;
-        start.FileName = usePerf ? "perf" : dotnet;
-        if (usePerf)
-        {
-            foreach (string arg in new[] { "stat", "-x,", "-e",
-                         string.Join(',', perfEvents), "-o", perfPath!, "--", dotnet })
-                start.ArgumentList.Add(arg);
-        }
-        start.ArgumentList.Add(appPath);
-        start.Environment["EXECUTION_MODE"] = "Replay";
-        if (fixture is null) start.Environment.Remove("REPLAY_FIXTURE");
-        else start.Environment["REPLAY_FIXTURE"] = fixture;
-        start.Environment["REPLAY_URL"] = url;
-        start.Environment["LOG_EVENTS"] = "false";
-        if (prefix is not null)
-        {
+        var command = new List<string>();
+        if (o.AppCpus is not null) command.AddRange(["taskset", "--cpu-list", o.AppCpus]);
+        bool usePerf = prefix is not null && perfEvents.Length > 0;
+        if (usePerf) command.AddRange(["perf", "stat", "-x,", "-e", string.Join(',', perfEvents), "-o", prefix + "-perf.csv", "--"]);
+        command.Add(target.Executable); command.AddRange(target.Arguments);
+        using var process = new Process { StartInfo = new ProcessStartInfo(command[0]) { RedirectStandardOutput = true, RedirectStandardError = true, UseShellExecute = false } };
+        var start = process.StartInfo; foreach (string arg in command.Skip(1)) start.ArgumentList.Add(arg);
+        foreach (string key in new[] { "BENCHMARK_OUTPUT", "BENCHMARK_EXPECTED_FRAMES", "BENCHMARK_WARMUP_FRAMES", "BENCHMARK_DIAGNOSTIC", "CORRECTNESS_TRACE", "MEASURE_ALLOCATIONS", "REPLAY_FIXTURE" }) start.Environment.Remove(key);
+        start.Environment["EXECUTION_MODE"] = "Replay"; start.Environment["REPLAY_URL"] = url; start.Environment["LOG_EVENTS"] = "false";
+        if (fixture is not null) start.Environment["REPLAY_FIXTURE"] = fixture;
+        if (prefix is not null) {
             start.Environment["BENCHMARK_OUTPUT"] = prefix + "-samples.json";
             start.Environment["BENCHMARK_EXPECTED_FRAMES"] = recording.Messages.Count.ToString(CultureInfo.InvariantCulture);
             start.Environment["BENCHMARK_WARMUP_FRAMES"] = warmup.ToString(CultureInfo.InvariantCulture);
-            if (diagnostic) start.Environment["BENCHMARK_DIAGNOSTIC"] = "1";
+            if (o.Diagnostic) start.Environment["BENCHMARK_DIAGNOSTIC"] = "1";
+            if (o.Trace) start.Environment["CORRECTNESS_TRACE"] = prefix + "-decisions.jsonl";
         }
-        start.RedirectStandardOutput = start.RedirectStandardError = true;
-        start.UseShellExecute = false;
-        var wall = Stopwatch.StartNew();
-        process.Start();
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
-        Task<string> stderr = process.StandardError.ReadToEndAsync();
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(
-            Math.Max(60, recording.DurationNanoseconds / speed / 1e9 * 3 + 30)));
+        var wall = Stopwatch.StartNew(); process.Start();
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync(), stderr = process.StandardError.ReadToEndAsync();
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        timeout.CancelAfter(TimeSpan.FromSeconds(Math.Max(60, recording.DurationNanoseconds / speed / 1e9 * 3 + 30)));
         try { await process.WaitForExitAsync(timeout.Token); }
-        catch (OperationCanceledException) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
-        wall.Stop();
-        string output = await stdout, error = await stderr;
-        if (prefix is not null)
-        {
-            await File.WriteAllTextAsync(prefix + "-stdout.txt", output);
-            await File.WriteAllTextAsync(prefix + "-stderr.txt", error);
-        }
+        catch (OperationCanceledException) { if (!process.HasExited) process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); }
+        finally { if (!process.HasExited) { process.Kill(entireProcessTree: true); await process.WaitForExitAsync(); } }
+        wall.Stop(); string output = await stdout, error = await stderr;
+        if (prefix is not null) { await File.WriteAllTextAsync(prefix + "-stdout.txt", output); await File.WriteAllTextAsync(prefix + "-stderr.txt", error); }
+        cancellationToken.ThrowIfCancellationRequested();
         ReplayReport? replay = null;
-        try { replay = await reportSource.Task.WaitAsync(TimeSpan.FromSeconds(10)); }
-        catch (TimeoutException) { }
+        try { replay = await source.Task.WaitAsync(TimeSpan.FromSeconds(10), cancellationToken); } catch (TimeoutException) { }
         BenchmarkAppReport? app = null;
-        if (prefix is not null && File.Exists(prefix + "-samples.json"))
-        {
+        if (prefix is not null && File.Exists(prefix + "-samples.json")) {
             app = JsonSerializer.Deserialize<BenchmarkAppReport>(await File.ReadAllTextAsync(prefix + "-samples.json"));
-            if (app is not null)
-            {
-                await WriteSamplesCsv(prefix + "-samples.csv", app.Frames, replay?.SendStartTicks);
-                await File.WriteAllTextAsync(prefix + "-gc-pauses.json", JsonSerializer.Serialize(app.GcPauses));
-                File.Delete(prefix + "-samples.json");
-            }
+            if (app is not null) { await WriteSamplesCsv(prefix + "-samples.csv", app.Frames, replay?.SendStartTicks); await WriteJson(prefix + "-gc-pauses.json", app.GcPauses); File.Delete(prefix + "-samples.json"); }
         }
-        var perf = usePerf && perfPath is not null ? ParsePerf(perfPath) :
-            new PerfCounters("whole_process", null, null, null, null, null,
-                usePerf ? "perf report unavailable" : "perf hardware counters unavailable or disabled");
-        return new(app, replay, perf, wall.Elapsed.TotalSeconds, process.ExitCode, error);
+        return new(app, replay, usePerf ? ParsePerf(prefix + "-perf.csv") : new("whole_process", null, null, null, null, null,
+            o.Smoke ? "not collected in smoke mode" : "perf hardware counters unavailable or disabled"), wall.Elapsed.TotalSeconds, process.ExitCode, error);
     }
-
     private static async Task<string[]> ProbePerf()
     {
         if (!OperatingSystem.IsLinux()) return [];

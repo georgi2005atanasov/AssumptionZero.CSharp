@@ -1,8 +1,10 @@
 # AssumptionZero.CSharp
 
+The Rust application now uses this simulator. See [Build and run controlled C# / Rust tests](docs/testing.md) for the three executable scripts and exact quiet-machine commands. Scripts default to **300,000 messages**; use `--max-messages N` or `--all`. The underlying CLI defaults to the entire recording.
+
 AssumptionZero.CSharp is the C# implementation of **AssumptionZero**, a research project comparing C# and Rust in a low-latency, real-time system.
 
-Both implementations will process the same market data, maintain an order book, run the same decision logic, and produce comparable outputs. The goal is to measure where time and CPU resources are spent, how each implementation behaves under load, and what changes at the tail of the latency distribution.
+Both implementations process the same market data, maintain an order book, run the same decision logic, and produce comparable outputs. The goal is to measure where time and CPU resources are spent, how each implementation behaves under load, and what changes at the tail of the latency distribution.
 
 The project uses a simplified crypto trading system as its test case. Its purpose is to study system performance, not to develop a profitable trading strategy.
 
@@ -17,7 +19,7 @@ The main processing path is:
 5. Calculate a fair price, spread, and quote sizes.
 6. Publish bid and ask place, keep, replace, or cancel intents. Order submission is outside this pipeline.
 
-The initial directional score uses microprice imbalance, weighted book imbalance, best-level order flow imbalance, aggressive trade flow, and momentum. Volatility, liquidity, adverse fills, inventory, and maker fees affect spread and size. The same algorithms and input data will be used in the Rust implementation so that the language comparison is meaningful.
+The initial directional score uses microprice imbalance, weighted book imbalance, best-level order flow imbalance, aggressive trade flow, and momentum. Volatility, liquidity, adverse fills, inventory, and maker fees affect spread and size. The same algorithms and input data are used in the Rust implementation so that the language comparison is meaningful.
 
 ## Market data and simulation
 
@@ -120,7 +122,7 @@ Results are saved in `comparison.json` and per-speed directories. Each run has a
 
 Application CPU time, average CPU cores used, CPU nanoseconds per measured frame, current and peak resident bytes, managed heap bytes, managed allocated bytes, allocation bytes per frame, Gen 0/1/2 counts, and cumulative GC pause time are reported separately from the simulator. Linux `perf` hardware counters cover the **whole application process**, including startup and warm-up, and are labelled with that scope. They are `null` with a reason when unavailable; on this host `perf_event_paranoid=4` blocks them. The process-wall measurement overhead estimate compares the five measured runs with one uninstrumented run at the same speed. It includes hardware-counter collection when available and is diagnostic because startup and replay scheduling contribute to wall time.
 
-For individual GC pauses, add `--diagnostic`. This enables runtime GC events and marks frames whose processing interval overlaps a pause. Diagnostic runs are labelled separately and do not produce a capacity verdict because event tracing can change latency. To compare with Rust later, emit the same versioned summary fields and frame-sample columns, run on the same host with the same recording and fixture, and distinguish C# managed allocations from Rust allocator allocations. No exchange/network delay is included in the receive-to-decision language-path metric; send-to-decision deliberately includes local WebSocket buffering and receiver backlog.
+For individual GC pauses, add `--diagnostic`. This enables runtime GC events and marks frames whose processing interval overlaps a pause. Diagnostic runs are labelled separately and do not produce a capacity verdict because event tracing can change latency. The shared coordinator can compare C# and Rust with `benchmark compare --rust-app PATH`; both emit the same versioned summary fields and frame-sample columns. Runs use the same host, selected recording, and fixture, and distinguish C# managed allocations from Rust allocator allocations. No exchange/network delay is included in the receive-to-decision language-path metric; send-to-decision deliberately includes local WebSocket buffering and receiver backlog.
 
 The exact report fields, units, sample columns, and decision hash are defined in [Benchmark report format](docs/benchmark-schema.md).
 
@@ -161,7 +163,7 @@ You need the .NET SDK used by the solution and a Binance Spot Testnet API key fo
 
 1. Visit [Binance Spot Testnet](https://testnet.binance.vision/).
 2. Create an Ed25519 key pair and register its **public** key.
-3. Set the issued API key in `BINANCE_APIKEY` and the path to its Ed25519 private key in `BINANCE_ED25519_PRIVATE_KEY_PATH`.
+3. Set the issued API key in `BINANCE_API_KEY` and the path to its Ed25519 private key in `BINANCE_ED25519_PRIVATE_KEY_PATH`.
 4. Restore and build the solution:
 
    ```bash
@@ -185,7 +187,7 @@ Commands below run from the solution directory in a shell with the .NET 10 SDK o
 
 ### Capture a recording
 
-Set `BINANCE_APIKEY` and `PG_CONNECTION` in your local environment. The database must contain the table from `AssumptionZero.App/init.sql`; run that script once for a new database, not against an already initialized table.
+Set `BINANCE_API_KEY` and `PG_CONNECTION` in your local environment. The database must contain the table from `AssumptionZero.App/init.sql`; run that script once for a new database, not against an already initialized table.
 
 ```bash
 export PG_CONNECTION='Host=localhost;Database=assumption_zero;Username=postgres;Password=YOUR_LOCAL_PASSWORD'

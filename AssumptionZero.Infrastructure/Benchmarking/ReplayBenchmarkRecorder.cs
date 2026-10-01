@@ -262,16 +262,29 @@ public sealed record BenchmarkAppReport(
     double CpuNanosecondsPerFrame,
     long ResidentBytes,
     long PeakResidentBytes,
-    long ManagedHeapBytes,
-    long ManagedAllocatedBytes,
-    double ManagedAllocatedBytesPerFrame,
-    int[] GcCollections,
-    long GcPauseNanoseconds,
+    long? ManagedHeapBytes,
+    long? ManagedAllocatedBytes,
+    double? ManagedAllocatedBytesPerFrame,
+    int[]? GcCollections,
+    long? GcPauseNanoseconds,
     LatencySummary IndividualGcPauseNanoseconds,
     bool Diagnostic,
     GcPause[] GcPauses,
     FrameSample[] Frames)
 {
+    public string BuildConfiguration { get; init; } =
+#if DEBUG
+        "Debug";
+#else
+        "Release";
+#endif
+    public bool? ServerGc { get; init; } = System.Runtime.GCSettings.IsServerGC;
+    public string? GcLatencyMode { get; init; } = System.Runtime.GCSettings.LatencyMode.ToString();
+    public int LogicalCpus { get; init; } = Environment.ProcessorCount;
+    public string? FinalStateHash { get; init; }
+    public long? AllocatorAllocatedBytes { get; init; }
+    public double? AllocatorAllocatedBytesPerFrame { get; init; }
+    public string AllocationScope { get; init; } = "process managed allocations; measured window";
     public void Write(string path) => File.WriteAllText(path,
         JsonSerializer.Serialize(this, new JsonSerializerOptions { WriteIndented = false }));
 }
@@ -292,14 +305,17 @@ public sealed record BenchmarkAppOverview(
     double CpuNanosecondsPerFrame,
     long ResidentBytes,
     long PeakResidentBytes,
-    long ManagedHeapBytes,
-    long ManagedAllocatedBytes,
-    double ManagedAllocatedBytesPerFrame,
-    int[] GcCollections,
-    long GcPauseNanoseconds,
+    long? ManagedHeapBytes,
+    long? ManagedAllocatedBytes,
+    double? ManagedAllocatedBytesPerFrame,
+    int[]? GcCollections,
+    long? GcPauseNanoseconds,
     LatencySummary IndividualGcPauseNanoseconds,
     int FramesOverlappingGc)
 {
+    public long? AllocatorAllocatedBytes { get; init; }
+    public double? AllocatorAllocatedBytesPerFrame { get; init; }
+    public string? AllocationScope { get; init; }
     public static BenchmarkAppOverview From(BenchmarkAppReport app) => new(
         app.ReceivedFrames, app.TotalDecisions, app.MeasuredFrames, app.MeasuredDecisions,
         app.MeasuredBytes, app.MeasuredDurationNanoseconds, app.DecodeNanoseconds,
@@ -307,5 +323,6 @@ public sealed record BenchmarkAppOverview(
         app.CpuCores, app.CpuNanosecondsPerFrame, app.ResidentBytes, app.PeakResidentBytes,
         app.ManagedHeapBytes, app.ManagedAllocatedBytes, app.ManagedAllocatedBytesPerFrame,
         app.GcCollections, app.GcPauseNanoseconds, app.IndividualGcPauseNanoseconds,
-        app.Frames.Count(f => f.GcPauseOverlap));
+        app.Frames.Count(f => f.GcPauseOverlap)) { AllocatorAllocatedBytes = app.AllocatorAllocatedBytes,
+            AllocatorAllocatedBytesPerFrame = app.AllocatorAllocatedBytesPerFrame, AllocationScope = app.AllocationScope };
 }
