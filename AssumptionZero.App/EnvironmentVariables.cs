@@ -1,3 +1,4 @@
+// ReSharper disable InconsistentNaming
 namespace AssumptionZero.App;
 
 public enum EnvKeys
@@ -11,6 +12,10 @@ public enum EnvKeys
     REPLAY_URL,
     BENCHMARK_OUTPUT,
     MEASURE_ALLOCATIONS,
+    BENCHMARK_EXPECTED_FRAMES,
+    BENCHMARK_WARMUP_FRAMES,
+    BENCHMARK_DIAGNOSTIC,
+    CORRECTNESS_TRACE,
 }
 
 public static class EnvironmentVariables

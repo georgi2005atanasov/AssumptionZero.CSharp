@@ -72,13 +72,13 @@ public sealed class ExecutionRouter
 
         string? benchmarkOutput = EnvironmentVariables.Get(EnvKeys.BENCHMARK_OUTPUT);
         using ReplayBenchmarkRecorder? benchmark = benchmarkOutput is null ? null : new(
-            int.Parse(Environment.GetEnvironmentVariable("BENCHMARK_EXPECTED_FRAMES")
+            int.Parse(EnvironmentVariables.Get(EnvKeys.BENCHMARK_EXPECTED_FRAMES)
                       ?? throw new InvalidOperationException("BENCHMARK_EXPECTED_FRAMES is required.")),
-            int.Parse(Environment.GetEnvironmentVariable("BENCHMARK_WARMUP_FRAMES") ?? "0"),
-            Environment.GetEnvironmentVariable("BENCHMARK_DIAGNOSTIC") == "1");
+            int.Parse(EnvironmentVariables.Get(EnvKeys.BENCHMARK_WARMUP_FRAMES) ?? "0"),
+            EnvironmentVariables.Get(EnvKeys.BENCHMARK_DIAGNOSTIC) == "1");
         feed.Benchmark = benchmark;
 
-        string? tracePath = Environment.GetEnvironmentVariable("CORRECTNESS_TRACE");
+        string? tracePath = EnvironmentVariables.Get(EnvKeys.CORRECTNESS_TRACE);
         using StreamWriter? trace = tracePath is null ? null : new StreamWriter(tracePath);
         int decisions = 0, actionable = 0, readyDecisions = 0;
         long allocationStart = 0, allocated = -1;
