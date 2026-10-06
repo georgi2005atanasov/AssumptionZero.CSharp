@@ -170,6 +170,8 @@ public static class BenchmarkRunner
                     if (app.SchemaVersion != 3 || app.ClockFrequency != Stopwatch.Frequency)
                         throw new InvalidDataException("App report schema or monotonic clock frequency differs from simulator.");
                     if (app.BuildConfiguration != "Release") throw new InvalidDataException("Measured application must be a Release build.");
+                    if (app.MemorySnapshotPhase != "after_replay_before_report")
+                        throw new InvalidDataException($"Rebuild the {t.Language} Release application: memory must be sampled before report construction.");
                     var (send, processing) = BenchmarkAnalysis.Summarize(app.Frames, replay.SendStartTicks, warmup, replay.SentMessages, app.ClockFrequency);
                     bool complete = once.ExitCode == 0 && app.Completed && replay.Completed &&
                         app.ReceivedFrames == recording.Messages.Count && app.Frames.Length == recording.Messages.Count && replay.SentMessages == recording.Messages.Count &&

@@ -171,6 +171,10 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         long cpuTicks = process.TotalProcessorTime.Ticks - startCpuTicks;
         long allocated = GC.GetTotalAllocatedBytes(false) - startAllocated;
         long gcPauseTicks = GC.GetTotalPauseDuration().Ticks - startGcPauseTicks;
+        // Match Rust's boundary: snapshot memory before allocating any report buffers.
+        long residentBytes = process.WorkingSet64;
+        long peakResidentBytes = process.PeakWorkingSet64;
+        long managedHeapBytes = GC.GetTotalMemory(false);
         int[] gcCounts = Enumerable.Range(0, 3).Select(i => GC.CollectionCount(i) - startGcCounts[i]).ToArray();
         FrameSample[] recorded = frames.AsSpan(0, count).ToArray();
         long finishUtcTicks = DateTime.UtcNow.Ticks;
@@ -225,11 +229,11 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
             Stage(f => f.SignalTicks), Stage(f => f.QuoteTicks),
             cpuTicks * 100L, durationNs == 0 ? 0 : cpuTicks * 100.0 / durationNs,
             measuredCount == 0 ? 0 : cpuTicks * 100.0 / measuredCount,
-            process.WorkingSet64, process.PeakWorkingSet64, GC.GetTotalMemory(false),
+            residentBytes, peakResidentBytes, managedHeapBytes,
             allocated, measuredCount == 0 ? 0 : (double)allocated / measuredCount,
             gcCounts, gcPauseTicks * 100L, LatencySummary.From(pauseDurations, pauseDurations.Length),
             gcListener is not null,
-            pauses, recorded);
+            pauses, recorded) { MemorySnapshotPhase = "after_replay_before_report" };
     }
 
     public void Dispose()
@@ -282,6 +286,7 @@ public sealed record BenchmarkAppReport(
     public string? GcLatencyMode { get; init; } = System.Runtime.GCSettings.LatencyMode.ToString();
     public int LogicalCpus { get; init; } = Environment.ProcessorCount;
     public string? FinalStateHash { get; init; }
+    public string? MemorySnapshotPhase { get; init; }
     public long? AllocatorAllocatedBytes { get; init; }
     public double? AllocatorAllocatedBytesPerFrame { get; init; }
     public string AllocationScope { get; init; } = "process managed allocations; measured window";
@@ -313,6 +318,7 @@ public sealed record BenchmarkAppOverview(
     LatencySummary IndividualGcPauseNanoseconds,
     int FramesOverlappingGc)
 {
+    public string? MemorySnapshotPhase { get; init; }
     public long? AllocatorAllocatedBytes { get; init; }
     public double? AllocatorAllocatedBytesPerFrame { get; init; }
     public string? AllocationScope { get; init; }
@@ -324,5 +330,6 @@ public sealed record BenchmarkAppOverview(
         app.ManagedHeapBytes, app.ManagedAllocatedBytes, app.ManagedAllocatedBytesPerFrame,
         app.GcCollections, app.GcPauseNanoseconds, app.IndividualGcPauseNanoseconds,
         app.Frames.Count(f => f.GcPauseOverlap)) { AllocatorAllocatedBytes = app.AllocatorAllocatedBytes,
-            AllocatorAllocatedBytesPerFrame = app.AllocatorAllocatedBytesPerFrame, AllocationScope = app.AllocationScope };
+            AllocatorAllocatedBytesPerFrame = app.AllocatorAllocatedBytesPerFrame, AllocationScope = app.AllocationScope,
+            MemorySnapshotPhase = app.MemorySnapshotPhase };
 }

@@ -10,6 +10,37 @@ namespace AssumptionZero.Tests;
 public class BenchmarkingTests
 {
     [TestMethod]
+    [DoNotParallelize]
+    public void MemorySnapshotExcludesReportConstruction()
+    {
+        using var benchmark = new ReplayBenchmarkRecorder(20_000, 2_000, diagnostic: false);
+        for (int i = 0; i < 20_000; i++)
+        {
+            benchmark.BeginFrame(WebSocketMessageType.Binary, 100, Stopwatch.GetTimestamp());
+            benchmark.AddDecode(1);
+            benchmark.AddBook(1);
+            benchmark.AddSignalAndQuote(1, 1);
+            benchmark.EndFrame();
+        }
+        // Prevent a collection from hiding the report-only allocations this test detects.
+        Assert.IsTrue(GC.TryStartNoGCRegion(64 * 1024 * 1024));
+        try
+        {
+            long before = GC.GetTotalMemory(false);
+            BenchmarkAppReport report = benchmark.Finish(true);
+            long after = GC.GetTotalMemory(false);
+            Assert.IsTrue(report.ManagedHeapBytes <= before + 1024 * 1024,
+                "The memory snapshot includes report-construction allocations.");
+            Assert.IsTrue(after > before + 2 * 1024 * 1024,
+                "The diagnostic must exercise substantial report-only allocation.");
+            Assert.AreEqual("after_replay_before_report", report.MemorySnapshotPhase);
+            Assert.AreEqual(report.MemorySnapshotPhase, BenchmarkAppOverview.From(report).MemorySnapshotPhase);
+            GC.KeepAlive(report);
+        }
+        finally { GC.EndNoGCRegion(); }
+    }
+
+    [TestMethod]
     public void DiagnosticListenerCapturesAnIndividualGcPause()
     {
         using var listener = new GcPauseListener();

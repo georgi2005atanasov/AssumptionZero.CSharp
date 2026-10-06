@@ -4,6 +4,7 @@ import os
 from pathlib import Path
 import shlex
 import subprocess
+import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -59,6 +60,51 @@ class Scripts(unittest.TestCase):
         cmd = self.run_script('run-simulator.sh', 'replay', '--all', '--speed', '1')
         self.assertIn('--all', cmd)
         self.assertEqual(cmd[cmd.index('--speed') + 1], '1')
+
+    def test_rust_build_resolves_installed_repositories_without_shell_setup(self):
+        for stale in (False, True):
+            env = dict(os.environ, HOME='/tmp/assumption-zero-no-home', PATH='/usr/bin:/bin')
+            for key in ('CSHARP_ROOT', 'RUST_ROOT', 'DOTNET_HOST_PATH'):
+                env.pop(key, None)
+            if stale:
+                env['CSHARP_ROOT'] = '/tmp/assumption-zero-missing-repository'
+            p = subprocess.run([str(RUST / 'scripts/run-rust.sh'), 'build', '--dry-run'],
+                               cwd='/tmp', env=env, text=True, capture_output=True)
+            self.assertEqual(p.returncode, 0, p.stderr)
+            cmd = shlex.split(p.stdout)
+            self.assertTrue(Path(cmd[0]).is_file())
+            self.assertEqual(cmd[1], '+stable')
+            self.assertEqual(cmd[cmd.index('--manifest-path') + 1], str(RUST / 'Cargo.toml'))
+
+    def test_compare_resolves_binaries_with_different_home_and_stale_roots(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            for stale in (False, True):
+                env = dict(os.environ, HOME=tmp, PATH='/usr/bin:/bin')
+                for key in ('CSHARP_ROOT', 'RUST_ROOT', 'DOTNET_HOST_PATH', 'APP_CPUS', 'SIMULATOR_CPUS'):
+                    env.pop(key, None)
+                if stale:
+                    env.update(CSHARP_ROOT=tmp, RUST_ROOT=tmp)
+                p = subprocess.run([str(ROOT / 'scripts/run-simulator.sh'), 'compare', '--dry-run'],
+                                   cwd='/tmp', env=env, text=True, capture_output=True)
+                self.assertEqual(p.returncode, 0, p.stderr)
+                cmd = shlex.split(p.stdout)
+                self.assertEqual(cmd[cmd.index('--rust-app') + 1],
+                                 str(RUST / 'target/release/assumption-zero'))
+                self.assertEqual(cmd[0], '/home/sparrow/.dotnet/dotnet')
+                self.assertEqual(cmd[cmd.index('--max-messages') + 1], '300000')
+
+    def test_rust_build_pins_output_directory(self):
+        cmd = self.run_script('run-rust.sh', 'build')
+        self.assertEqual(cmd[cmd.index('--target-dir') + 1], str(RUST / 'target'))
+
+    def test_explicit_rust_paths_are_preserved(self):
+        cmd = self.run_script('run-simulator.sh', 'compare', '--rust-root', '/tmp/explicit rust')
+        self.assertEqual(cmd[cmd.index('--rust-app') + 1],
+                         '/tmp/explicit rust/target/release/assumption-zero')
+
+    def test_explicit_missing_csharp_repository_is_reported(self):
+        self.run_script('run-rust.sh', 'build', '--csharp-root',
+                        '/tmp/assumption-zero-missing-repository', ok=False)
 
     def test_build_is_separate(self):
         self.assertIn('build', self.run_script('run-rust.sh', 'build'))

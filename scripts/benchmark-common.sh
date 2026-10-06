@@ -49,7 +49,11 @@ az_main() {
   local replay_url=${REPLAY_URL:-ws://127.0.0.1:5080/stream} listen_url=http://127.0.0.1:5080
   local -a extra=() cmd=()
   local -A seen=()
-  export RUST_ROOT="${RUST_ROOT:-$HOME/CLionProjects/assumption-zero}"
+  local default_rust_root=/home/sparrow/CLionProjects/assumption-zero
+  export RUST_ROOT="${RUST_ROOT:-$default_rust_root}"
+  if [[ ! -f "$RUST_ROOT/Cargo.toml" && -f "$default_rust_root/Cargo.toml" ]]; then
+    export RUST_ROOT=$default_rust_root
+  fi
   while (($#)); do
     local key=$1; shift
     [[ -z ${seen[$key]:-} ]] || az_fail "Duplicate option $key"
@@ -90,16 +94,40 @@ az_main() {
   if [[ -z $limit && $all == 0 ]]; then if ((smoke)); then limit=1000; else limit=300000; fi; fi
   local dotnet=${DOTNET_HOST_PATH:-}
   if [[ -z $dotnet ]]; then
-    if [[ -x "$HOME/.dotnet/dotnet" ]]; then dotnet="$HOME/.dotnet/dotnet"; else dotnet=$(command -v dotnet || true); fi
+    if [[ -x /home/sparrow/.dotnet/dotnet ]]; then dotnet=/home/sparrow/.dotnet/dotnet;
+    elif [[ -x "$HOME/.dotnet/dotnet" ]]; then dotnet="$HOME/.dotnet/dotnet";
+    else dotnet=$(command -v dotnet || true); fi
   fi
-  [[ -n $dotnet ]] || az_fail 'Install the .NET 10 SDK or set DOTNET_HOST_PATH'
+  local cargo_bin=cargo
+  local -a cargo_command=()
+  if [[ $entry == rust && ( $mode == build || $mode == test ) ]]; then
+    cargo_bin=$(command -v cargo || true)
+    if [[ -z $cargo_bin ]]; then
+      for candidate in "$HOME/.cargo/bin/cargo" /home/sparrow/.cargo/bin/cargo; do
+        if [[ -x $candidate ]]; then cargo_bin=$candidate; break; fi
+      done
+    fi
+    [[ -n $cargo_bin ]] || az_fail 'Rust/Cargo was not found'
+    cargo_command=("$cargo_bin")
+    local rustup_bin="$(dirname -- "$cargo_bin")/rustup"
+    if [[ -x $rustup_bin ]]; then
+      # --manifest-path does not select a rustup toolchain from another directory.
+      # Select stable explicitly without modifying the user's global default.
+      cargo_command+=(+stable)
+      if (( ! dry )) && ! "$rustup_bin" run stable cargo --version >/dev/null 2>&1; then
+        "$rustup_bin" toolchain install stable --profile minimal || az_fail 'Could not install the stable Rust toolchain'
+      fi
+    fi
+  else
+    [[ -n $dotnet ]] || az_fail 'Install the .NET 10 SDK or set DOTNET_HOST_PATH'
+  fi
   export DOTNET_HOST_PATH=$dotnet
   local simulator="$CSHARP_ROOT/AssumptionZero.Simulator/bin/Release/net10.0/AssumptionZero.Simulator.dll"
   csharp_app=${csharp_app:-$CSHARP_ROOT/AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll}
   rust_app=${rust_app:-$RUST_ROOT/target/release/assumption-zero}
   case "$mode" in
     build)
-      if [[ $entry == rust ]]; then cmd=(cargo build --locked --release --manifest-path "$RUST_ROOT/Cargo.toml"); else cmd=("$dotnet" build "$CSHARP_ROOT/AssumptionZero.sln" -c Release -m:1); fi
+      if [[ $entry == rust ]]; then cmd=("${cargo_command[@]}" build --locked --release --manifest-path "$RUST_ROOT/Cargo.toml" --target-dir "$RUST_ROOT/target"); else cmd=("$dotnet" build "$CSHARP_ROOT/AssumptionZero.sln" -c Release -m:1); fi
       if ((dry)); then printf '%q ' "${cmd[@]}"; printf '\n'; return; fi
       "${cmd[@]}"
       if [[ $entry == rust ]]; then python3 "$CSHARP_ROOT/scripts/environment.py" manifest "$RUST_ROOT" "$rust_app";
@@ -107,7 +135,7 @@ az_main() {
       return ;;
     test)
       export PG_TEST_CONNECTION="${PG_TEST_CONNECTION:-$PG_CONNECTION}"
-      if [[ $entry == rust ]]; then cmd=(cargo test --locked --release --manifest-path "$RUST_ROOT/Cargo.toml"); else cmd=("$dotnet" test "$CSHARP_ROOT/AssumptionZero.sln" -c Release -m:1); fi ;;
+      if [[ $entry == rust ]]; then cmd=("${cargo_command[@]}" test --locked --release --manifest-path "$RUST_ROOT/Cargo.toml" --target-dir "$RUST_ROOT/target"); else cmd=("$dotnet" test "$CSHARP_ROOT/AssumptionZero.sln" -c Release -m:1); fi ;;
     replay)
       if [[ $entry == simulator ]]; then
         if [[ $recording == demo ]]; then cmd=("$dotnet" "$simulator" demo "$listen_url"); else cmd=("$dotnet" "$simulator" replay "$recording" "$listen_url"); fi
@@ -125,6 +153,9 @@ az_main() {
     benchmark|smoke|compare)
       [[ $mode != compare || $entry == simulator ]] || az_fail 'Use run-simulator.sh compare'
       [[ $entry != simulator || $mode == compare || $mode == smoke ]] || az_fail 'Choose compare, or use a language benchmark script'
+      # Reports are intentionally readable across local user sessions.
+      # mktemp always creates a private directory, regardless of umask.
+      if (( ! dry )); then umask 022; fi
       local action=run
       [[ $mode != compare ]] || action=compare
       cmd=("$dotnet" "$simulator" benchmark "$action" --recording "$recording")
@@ -138,7 +169,11 @@ az_main() {
       [[ -z $app_cpus ]] || cmd+=(--app-cpus "$app_cpus")
       if [[ -z $output ]]; then
         if ((dry)); then output="$CSHARP_ROOT/benchmark-results/NEW-$entry-$mode";
-        else mkdir -p "$CSHARP_ROOT/benchmark-results"; output=$(mktemp -d "$CSHARP_ROOT/benchmark-results/$(date -u +%Y%m%dT%H%M%SZ)-$entry-$mode-XXXXXX"); fi
+        else
+          mkdir -p "$CSHARP_ROOT/benchmark-results"
+          output=$(mktemp -d "$CSHARP_ROOT/benchmark-results/$(date -u +%Y%m%dT%H%M%SZ)-$entry-$mode-XXXXXX")
+          chmod a+rx "$output"
+        fi
       fi
       cmd+=(--out "$output" "${extra[@]}") ;;
     *) az_fail "Unknown mode $mode" ;;
@@ -153,7 +188,7 @@ az_main() {
   if ((dry)); then printf '%q ' "${cmd[@]}"; printf '\n'; return; fi
   if [[ $mode != test ]]; then
     if [[ $mode != replay || $entry == simulator ]]; then [[ -f $simulator ]] || az_fail 'Build the C# solution first'; fi
-    if [[ $entry == rust || $mode == compare ]]; then [[ -x $rust_app ]] || az_fail 'Build the Rust Release application first'; fi
+    if [[ $entry == rust || $mode == compare ]]; then [[ -x $rust_app ]] || az_fail "Rust Release executable not found at $rust_app. Run $RUST_ROOT/scripts/run-rust.sh build"; fi
     if [[ $entry == csharp || $mode == compare ]]; then [[ -f $csharp_app ]] || az_fail 'Build the C# Release application first'; fi
   fi
   [[ -z $output ]] || echo "Results: $output"

@@ -62,15 +62,20 @@ Optional CPU pinning:
 ```bash
 lscpu -e=CPU,CORE,SOCKET,ONLINE
 
-# Verified on this machine: CPUs 0/1 are physical core 0; CPUs 2/3 are core 1.
-# Pinning these processes to distinct cores also avoids sharing SMT siblings.
-export SIMULATOR_CPUS=0
+# Verified on this machine: CPUs 2/3 share physical core 1.
+# Give the simulator several other physical cores for its timing and I/O workers.
+export SIMULATOR_CPUS=0,4,6,8,10,12,14
 export APP_CPUS=2
 ```
 
 Both variables must be set together when pinning. Scripts validate allowed CPU
 sets and physical-core separation. C# and Rust receive exactly the same
 application CPU set. This example measures one-core application performance.
+Do not restrict this simulator to one logical CPU: the dedicated replay thread
+spin-waits near deadlines while Kestrel uses other workers to deliver data.
+The October 2 audit reproduced approximately 3 ms pre-receive batching with that
+restriction. A wider simulator CPU set substantially reduced it in bounded
+diagnostics. This does not guarantee that a full run passes its timing gates.
 Choose the same larger application CPU set for both languages if that is the
 experiment you intend. To use the normal scheduler instead:
 

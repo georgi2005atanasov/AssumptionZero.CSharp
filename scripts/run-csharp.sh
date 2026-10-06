@@ -1,5 +1,9 @@
 #!/usr/bin/env bash
 set -euo pipefail
-export CSHARP_ROOT="${CSHARP_ROOT:-$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)}"
+script_root=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)
+export CSHARP_ROOT="${CSHARP_ROOT:-$script_root}"
+if [[ ! -f "$CSHARP_ROOT/scripts/benchmark-common.sh" ]]; then
+  export CSHARP_ROOT=$script_root
+fi
 source "$CSHARP_ROOT/scripts/benchmark-common.sh"
 az_main csharp "$@"

@@ -82,3 +82,19 @@ still permits valid observed performance ratios, but does not pass capacity.
 Smoke/trace/GC-diagnostic runs publish no ratios. Raw per-run results always remain
 available. Ratios are CSharp/Rust with min/median/max over five runs per language;
 allocation counters of different scopes are not divided into a misleading ratio.
+
+## Memory sampling correction (2026-10-02)
+
+`Application.MemorySnapshotPhase` must be `after_replay_before_report` in new
+comparisons. Both implementations snapshot RSS/peak RSS before allocating
+statistics or report buffers. Peak RSS still includes startup and warm-up;
+resident memory still includes retained benchmark sample buffers.
+
+Earlier reports omit this field: C# sampled memory after constructing statistics,
+while Rust sampled beforehand. Their memory ratios are not comparable. Do not
+mix these results with corrected reports or estimate corrected values by subtraction.
+The coordinator rejects binaries without the sampling-phase marker.
+
+This is an additive field in schema 5; earlier data remains unchanged. The source
+and binary provenance identify the corrected build. The change does not calibrate
+instrumentation overhead or explain differences in process CPU consumption.
