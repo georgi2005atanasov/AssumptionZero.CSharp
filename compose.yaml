@@ -1,0 +1,67 @@
+x-runtime: &runtime
+  build:
+    context: .
+    target: runtime
+  image: assumptionzero-demo:local
+
+services:
+  simulator:
+    <<: *runtime
+    command: ["dotnet", "/app/simulator/AssumptionZero.Simulator.dll", "demo", "http://0.0.0.0:5080"]
+    healthcheck:
+      test: ["CMD", "bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/5080"]
+      interval: 1s
+      timeout: 2s
+      retries: 30
+      start_period: 5s
+
+  app:
+    <<: *runtime
+    depends_on:
+      simulator:
+        condition: service_healthy
+    environment:
+      EXECUTION_MODE: Replay
+      REPLAY_URL: ws://simulator:5080/stream
+      REPLAY_FIXTURE: /app/trader/replay-fixture.json
+      LOG_EVENTS: "false"
+
+  tests:
+    profiles: ["tests"]
+    build:
+      context: .
+      target: tests
+
+  database:
+    profiles: ["database"]
+    image: postgres:16
+    environment:
+      POSTGRES_DB: assumption_zero
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: local_test_password
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5433}:5432"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./AssumptionZero.App/init.sql:/docker-entrypoint-initdb.d/001-recordings.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d assumption_zero"]
+      interval: 1s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  database-tests:
+    profiles: ["database"]
+    build:
+      context: .
+      target: tests
+    depends_on:
+      database:
+        condition: service_healthy
+    environment:
+      PG_TEST_CONNECTION: Host=database;Database=assumption_zero;Username=postgres;Password=local_test_password
+    command: ["dotnet", "test", "AssumptionZero.Tests/AssumptionZero.Tests.csproj", "-c", "Release", "--no-build", "--no-restore", "--filter", "FullyQualifiedName~RecordingRepositoryTests"]
+
+volumes:
+  postgres-data:
