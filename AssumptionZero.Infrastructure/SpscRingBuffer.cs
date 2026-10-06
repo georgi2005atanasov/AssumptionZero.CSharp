@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace AssumptionZero.Infrastructure;
 
-public sealed class SpscRingBuffer<T>  where T: unmanaged
+public sealed class SpscRingBuffer<T> where T : unmanaged
 {
     private readonly T[] buffer;
     private readonly ulong capacity;
@@ -26,7 +26,7 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
         private long p0, p1, p2, p3, p4, p5, p6, p7;
 
         public ulong Value;
-        
+
         private long q0, q1, q2, q3, q4, q5, q6, q7;
 #pragma warning restore CS0169
     }
@@ -68,7 +68,7 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
         ulong next = unchecked(tail + 1);
 
         producerTail = next;
-        
+
         Volatile.Write(ref publishedTail.Value, next);
 
         return true;
@@ -97,7 +97,7 @@ public sealed class SpscRingBuffer<T>  where T: unmanaged
         ulong next = unchecked(head + 1);
 
         consumerHead = next;
-        
+
         Volatile.Write(ref publishedHead.Value, next);
 
         return true;

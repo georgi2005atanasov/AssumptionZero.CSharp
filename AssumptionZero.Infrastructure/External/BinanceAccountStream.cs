@@ -32,7 +32,8 @@ public sealed class BinanceAccountStream(
     string apiKey,
     BinanceLiveBootstrap bootstrap,
     AccountRiskLedger ledger,
-    InstrumentRuntime[] runtimes)
+    InstrumentRuntime[] runtimes
+)
     : IAsyncDisposable
 {
     private readonly SpscRingBuffer<AccountEvent> events = new(8_192);

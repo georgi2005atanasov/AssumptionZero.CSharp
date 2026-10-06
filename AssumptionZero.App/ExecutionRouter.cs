@@ -17,8 +17,8 @@ public sealed class ExecutionRouter
 
     public async Task NormalExecution(string[] symbols, bool logEvents, CancellationToken cancellationToken)
     {
-        string apiKey = Required(EnvKeys.BINANCE_API_KEY);
-        string privateKeyPath = Required(EnvKeys.BINANCE_ED25519_PRIVATE_KEY_PATH);
+        string apiKey = ThrowIfMissing(EnvKeys.BINANCE_API_KEY);
+        string privateKeyPath = ThrowIfMissing(EnvKeys.BINANCE_ED25519_PRIVATE_KEY_PATH);
         using var bootstrap = new BinanceLiveBootstrap(apiKey, privateKeyPath);
         var instruments = await bootstrap.LoadInstruments(symbols, cancellationToken);
         string[] assets = instruments.SelectMany(i => new[] { i.BaseAsset, i.QuoteAsset })
@@ -118,7 +118,7 @@ public sealed class ExecutionRouter
             Console.WriteLine($"MARKET_ALLOCATED_BYTES={allocated};READY_DECISIONS={readyDecisions}");
     }
 
-    private static string Required(EnvKeys key) =>
+    private static string ThrowIfMissing(EnvKeys key) =>
         EnvironmentVariables.Get(key) is { Length: > 0 } value ? value :
             throw new InvalidOperationException($"{key} not found.");
 }
