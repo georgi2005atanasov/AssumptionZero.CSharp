@@ -618,7 +618,7 @@ public class TradingPipelineTests
             await process.WaitForExitAsync().WaitAsync(TimeSpan.FromSeconds(20));
             Assert.AreEqual(0, process.ExitCode, error + output);
             StringAssert.Contains(output, "Replay complete: 640 decisions, ");
-            StringAssert.Contains(output, "Products: 2 with a book, 2 ready of 100 configured.");
+            StringAssert.Contains(output, "Products: 2 with a book, 2 ready of 5 configured.");
             StringAssert.Contains(output, "MARKET_ALLOCATED_BYTES=0;READY_DECISIONS=");
         }
     }
