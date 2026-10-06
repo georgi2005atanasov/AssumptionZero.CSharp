@@ -225,12 +225,12 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         return decision;
     }
 
-    public void OnBalanceChanged(int changedAsset = -1)
+    public void OnBalanceChanged(int changedAsset = -1, bool confirmPending = true)
     {
         inventory.CurrentQuantity = Instrument.ToQuantityUnits(account.Total(baseAsset));
-        if (changedAsset == quoteAsset && pendingBidIntent > 0 && orders.BidOrder.OrderId > 0 &&
+        if (confirmPending && changedAsset == quoteAsset && pendingBidIntent > 0 && orders.BidOrder.OrderId > 0 &&
             pendingBidAction == QuoteAction.Place) ClearIntent(true);
-        if (changedAsset == baseAsset && pendingAskIntent > 0 && orders.AskOrder.OrderId > 0 &&
+        if (confirmPending && changedAsset == baseAsset && pendingAskIntent > 0 && orders.AskOrder.OrderId > 0 &&
             pendingAskAction == QuoteAction.Place) ClearIntent(false);
     }
 
@@ -392,6 +392,13 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         if (!order.IsActive || order.Status != OrderStatus.PendingNew || order.OrderId != 0) return false;
         order.OrderId = orderId;
         return true;
+    }
+
+    public void ConfirmIntent(bool buy, long intentId)
+    {
+        if ((buy ? pendingBidIntent : pendingAskIntent) != intentId)
+            throw new InvalidOperationException("Acknowledgement does not match pending intent.");
+        ClearIntent(buy);
     }
 
     private void ClearIntent(bool buy)

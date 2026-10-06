@@ -9,7 +9,8 @@ The second aim is to compare **C# and [Rust](https://github.com/georgi2005atanas
 on the same hot path**: identical market messages, strategy rules, and starting
 state, with correctness checked before
 interpreting latency, CPU, allocation, or memory results. This is a working
-processing prototype; it produces quote intents but does not submit orders.
+processing prototype; its local simulation mode now submits controlled orders,
+while normal replay and live processing produce quote intents.
 
 C# is already optimized around bounded arrays, reusable buffers, and a single
 market processing loop, with tests for zero managed allocations in warmed core
@@ -158,6 +159,7 @@ connection. Stop the simulator with Ctrl+C.
 | `EXECUTION_MODE` | Behavior | Requirements |
 | --- | --- | --- |
 | `Replay` (default) | Process messages from the local simulator | Running simulator; a matching fixture is optional |
+| `SimulatedExchange` | Controlled local order/report cycle | Use the closed-loop launcher |
 | `SeedData` | Record live SBE market messages into PostgreSQL | Testnet API key and database |
 | `NormalExecution` | Load instrument/account/book snapshots, subscribe to account events, and process live market data | Testnet API key and matching Ed25519 private key |
 
@@ -222,6 +224,34 @@ To enable the Rust integration tests after building its Release executable:
 export RUST_APP_TEST='/absolute/path/to/assumption-zero/target/release/assumption-zero'
 dotnet test AssumptionZero.Tests/AssumptionZero.Tests.csproj -c Release --no-build
 ```
+
+## Controlled exchange benchmark
+
+The new `SimulatedExchange` mode sends orders to a local C# exchange and receives
+acknowledgements, rejections, partial/full fills, and cancellations. Both clients
+update inventory and the shared risk ledger before subsequent decisions. The
+normal replay and live modes retain their existing intent-only behavior.
+
+The default comparison now offers **500,000 messages over 600 seconds per run**,
+with 50,000 warmup messages, repeated deterministic equivalence checks, a baseline
+pair, and five alternating measured pairs. This is about two hours plus preflight.
+It uses recorded market data and controlled synthetic execution, with no Binance
+calls. Async order counts can differ, so matching frames alone is not evidence of
+an equal workload or a rewrite decision.
+
+```bash
+/home/sparrow/RiderProjects/AssumptionZero/scripts/run-closed-loop-benchmark.sh prepare
+# Close other applications before the measurement run.
+/home/sparrow/RiderProjects/AssumptionZero/scripts/run-closed-loop-benchmark.sh run \
+  --max-messages 500000 --target-duration-seconds 600 \
+  --app-cpus 2 --simulator-cpus 0,4,6,8,10,12,14
+```
+
+The CPU IDs above match the development machine. Preparation fingerprints the
+build; the run writes reconciled results and an archive to return for analysis.
+See [the closed-loop runbook](docs/closed-loop-benchmark.md) for protocol, measurement boundaries, readiness limits, and options.
+The published October 2 figures below still describe the earlier market-only
+benchmark; they are not results of this new order-cycle test.
 
 ## What the recorded comparison shows
 

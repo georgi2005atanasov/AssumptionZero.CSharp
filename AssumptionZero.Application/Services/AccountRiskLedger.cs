@@ -10,6 +10,12 @@ public sealed class AccountRiskLedger(string[] assets)
     private readonly decimal[] reserved = new decimal[assets.Length];
     private readonly Intent[] intents = new Intent[4_096];
     private long nextIntentId;
+    public int AssetCount => assets.Length;
+    public string[] Assets => (string[])assets.Clone();
+    public decimal RawFree(int asset) => free[asset];
+    public decimal Locked(int asset) => locked[asset];
+    public decimal Reserved(int asset) => reserved[asset];
+    public int PendingCount => intents.Count(i => i.Id != 0);
     public bool Ready { get; private set; }
     public decimal MakerFeeRate { get; private set; }
 
@@ -83,7 +89,7 @@ public sealed class AccountRiskLedger(string[] assets)
         if (!Ready || quantity <= 0 || priceTicks <= 0) return false;
         int asset = FindAsset(buy ? instrument.QuoteAsset : instrument.BaseAsset);
         if (asset < 0) return false;
-        decimal amount = instrument.Quantity(quantity) * (buy ? instrument.Price(priceTicks) : 1);
+        decimal amount = instrument.Quantity(quantity) * (buy ? instrument.Price(priceTicks) * (1 + MakerFeeRate) : 1);
         if (requireAvailable && amount > Free(asset)) return false;
         for (int i = 0; i < intents.Length; i++)
         {

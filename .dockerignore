@@ -1,0 +1,16 @@
+.git
+.idea
+.vscode
+**/bin
+**/obj
+**/TestResults
+benchmark-results
+output
+tmp
+**/*.pem
+**/*.key
+**/*.pfx
+.env
+.env.*
+**/*.user
+**/appsettings.Development.json

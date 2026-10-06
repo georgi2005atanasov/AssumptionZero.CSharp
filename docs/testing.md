@@ -212,3 +212,9 @@ should use `smoke`; a normal benchmark with 1,000 entries correctly fails the
 
 Use `--help` for all options and `--dry-run` to inspect the resolved command
 without starting a benchmark. Credentials are not included in that command.
+
+## Full order-cycle simulation
+
+The 500,000-message, ten-minute-per-run order-cycle comparison has a separate
+[closed-loop runbook](closed-loop-benchmark.md) and launcher. The commands above
+continue to run the existing market-only benchmark.

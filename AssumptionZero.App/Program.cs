@@ -1,6 +1,15 @@
 ﻿using AssumptionZero.App;
 using AssumptionZero.Infrastructure;
 
+if (Environment.GetEnvironmentVariable("EXECUTION_MODE") == "SimulatedExchange")
+{
+    using var simStop = new CancellationTokenSource();
+    Console.CancelKeyPress += (_, e) => { e.Cancel = true; simStop.Cancel(); };
+    await ClosedLoopClient.Run(Environment.GetEnvironmentVariable("SIM_EXCHANGE_URL") ?? throw new ArgumentException("SIM_EXCHANGE_URL required"),
+        Environment.GetEnvironmentVariable("SIM_OUTPUT") ?? throw new ArgumentException("SIM_OUTPUT required"), simStop.Token);
+    return;
+}
+
 string binanceApiKey = EnvironmentVariables.Get(EnvKeys.BINANCE_API_KEY) ??
                        AssumptionZero.App.AppConstants.DefaultBinanceApiKey;
 string connectionString = EnvironmentVariables.Get(EnvKeys.PG_CONNECTION) ??

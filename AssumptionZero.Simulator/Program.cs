@@ -24,6 +24,7 @@ using var cancellation = new CancellationTokenSource();
 Console.CancelKeyPress += (_, e) => { e.Cancel = true; cancellation.Cancel(); };
 try
 {
+    if (args[0] == "closed-loop") return await ClosedLoopRunner.Run(args[1..], cancellation.Token);
     if (args[0] == "benchmark") return await BenchmarkRunner.RunAsync(args[1..], cancellation.Token);
     string connection = Environment.GetEnvironmentVariable("PG_CONNECTION") ?? AssumptionZero.AppDefaults.ConnectionString;
     var repository = new RecordingRepository(connection);

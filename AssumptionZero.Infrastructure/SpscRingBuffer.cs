@@ -3,7 +3,7 @@ using System.Runtime.CompilerServices;
 
 namespace AssumptionZero.Infrastructure;
 
-public sealed class SpscRingBuffer<T> where T : unmanaged
+public sealed class SpscRingBuffer<T>
 {
     private readonly T[] buffer;
     private readonly ulong capacity;
@@ -49,7 +49,8 @@ public sealed class SpscRingBuffer<T> where T : unmanaged
     /// </summary>
     /// <param name="item"></param>
     /// <returns></returns>
-    [MethodImpl(MethodImplOptions.AggressiveInlining)]
+    public int Count => Math.Clamp((int)(Volatile.Read(ref publishedTail.Value) - Volatile.Read(ref publishedHead.Value)), 0, (int)capacity);
+
     public bool TryEnqueue(in T item)
     {
         ulong tail = producerTail;
@@ -85,7 +86,7 @@ public sealed class SpscRingBuffer<T> where T : unmanaged
 
             if (head == consumerTailCache)
             {
-                item = default;
+                item = default!;
                 return false;
             }
         }
@@ -93,6 +94,7 @@ public sealed class SpscRingBuffer<T> where T : unmanaged
         int index = (int)(head & mask);
 
         item = buffer[index];
+        if (RuntimeHelpers.IsReferenceOrContainsReferences<T>()) buffer[index] = default!;
 
         ulong next = unchecked(head + 1);
 
