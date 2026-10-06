@@ -135,4 +135,53 @@ public class SimulatedExchangeTests
         finally { if (Directory.Exists(output)) Directory.Delete(output, true); }
     }
 
+    [DataTestMethod]
+    [DataRow("Rust")]
+    [DataRow("CSharp")]
+    public async Task PacedClientsSurviveFrequentWebSocketKeepAlives(string language)
+    {
+        string? rust = Environment.GetEnvironmentVariable("RUST_APP_TEST");
+        if (language == "Rust" && (rust is null || !File.Exists(rust))) Assert.Inconclusive("Set RUST_APP_TEST to the Release Rust client.");
+        var recording = DemoRecording.Create();
+        var manifest = ClosedLoopSession.Manifest(recording, ["BTCUSDT"], "async", "mixed");
+        var session = new ClosedLoopSession(recording, manifest, 2);
+        await using var server = session.Create(TimeSpan.FromMilliseconds(25));
+        await server.StartAsync();
+        string file = Path.Combine(Path.GetTempPath(), "az-keepalive-" + Guid.NewGuid().ToString("N") + ".json");
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../.."));
+        var start = new System.Diagnostics.ProcessStartInfo(language == "Rust" ? rust! : Environment.GetEnvironmentVariable("DOTNET_HOST_PATH") ?? "/home/sparrow/.dotnet/dotnet")
+        {
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            UseShellExecute = false
+        };
+        if (language == "CSharp") start.ArgumentList.Add(Path.Combine(root, "AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll"));
+        start.Environment["EXECUTION_MODE"] = "SimulatedExchange";
+        start.Environment["SIM_EXCHANGE_URL"] = server.Urls.Single().Replace("http://", "ws://");
+        start.Environment["SIM_OUTPUT"] = file; start.Environment["SIM_MEASURE"] = "true";
+        using var child = System.Diagnostics.Process.Start(start)!;
+        var stdout = child.StandardOutput.ReadToEndAsync(); var stderr = child.StandardError.ReadToEndAsync();
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
+        var serving = session.Run(timeout.Token);
+        try
+        {
+            await child.WaitForExitAsync(timeout.Token);
+            Assert.AreEqual(0, child.ExitCode, await stderr);
+            await serving;
+            using var result = System.Text.Json.JsonDocument.Parse(await File.ReadAllTextAsync(file));
+            Assert.IsTrue(result.RootElement.GetProperty("completed").GetBoolean());
+            Assert.AreEqual(120, result.RootElement.GetProperty("frames").GetInt32());
+            Assert.AreEqual(session.Exchange.Sequence, result.RootElement.GetProperty("reports").GetInt64());
+            Assert.AreEqual(0, session.Exchange.OpenOrders);
+        }
+        finally
+        {
+            await timeout.CancelAsync(); if (!child.HasExited) child.Kill(true);
+            await child.WaitForExitAsync(); await stdout; await stderr;
+            try { await serving; } catch { }
+            await server.StopAsync();
+            File.Delete(file); File.Delete(file + ".samples.csv");
+        }
+    }
+
 }

@@ -152,3 +152,17 @@ at the endpoint. These are correctness observations, not quiet-machine timing
 results. Full order cycles improve the evidence beyond the old market-only
 report, but still do not establish production execution quality, maximum
 capacity, or a reason to rewrite an adequate C# system.
+
+## WebSocket keep-alive regression
+
+The first ten-minute attempt exposed a Rust transport bug after the server's
+normal two-minute keep-alive: an empty Pong was passed to the JSON decoder.
+The Rust readers now distinguish application messages from Ping/Pong controls
+on both channels, including the manifest handshake. Disconnects and malformed
+application data still fail the session. Regression tests exercise frequent
+server keep-alives, real Ping/Pong exchanges, and both client implementations.
+The failed archive remains diagnostic evidence; restart the comparison with
+rebuilt binaries rather than combine partial results from different builds.
+
+Run the launcher as your normal user. Its selected `DOTNET_HOST_PATH` now also
+applies to the coordinator's C# child processes, keeping the runtime consistent.

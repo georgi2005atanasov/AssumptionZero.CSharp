@@ -15,10 +15,13 @@ public sealed class ClosedLoopSession(Recording recording, SimManifest manifest,
     private readonly Channel<ExchangePacket> incoming = Channel.CreateBounded<ExchangePacket>(new BoundedChannelOptions(Capacity) { SingleReader = true, SingleWriter = true });
     public SimulatedExchange Exchange { get; } = new(manifest);
     public List<long> SenderLateness { get; } = new();
-    public WebApplication Create()
+    public WebApplication Create(TimeSpan? keepAliveInterval = null)
     {
         var builder = WebApplication.CreateSlimBuilder(); builder.Logging.ClearProviders(); builder.WebHost.UseUrls("http://127.0.0.1:0");
-        var app = builder.Build(); app.UseWebSockets();
+        var app = builder.Build();
+        var websocketOptions = new WebSocketOptions();
+        if (keepAliveInterval is { } interval) websocketOptions.KeepAliveInterval = interval;
+        app.UseWebSockets(websocketOptions);
         app.MapGet("/market", c => Accept(c, market, false)); app.MapGet("/orders", c => Accept(c, orders, true)); return app;
     }
     private async Task Accept(HttpContext context, TaskCompletionSource<WebSocket> target, bool receive)

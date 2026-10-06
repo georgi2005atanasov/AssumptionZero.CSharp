@@ -68,6 +68,12 @@ def physical(cpus):
     return result
 
 
+def runtime_environment(dotnet):
+    # The coordinator launches C# children. Use the same host that was selected
+    # for it, including when HOME or DOTNET_HOST_PATH differs between users.
+    return dict(os.environ, DOTNET_HOST_PATH=dotnet)
+
+
 def main():
     p = argparse.ArgumentParser(description='Local simulated exchange. Defaults: 500k frames, 50k warmup, 600 seconds per paced replay, five alternating pairs plus a timing-disabled baseline pair. About two hours plus deterministic preflight. No Binance access.')
     p.add_argument('mode', choices=['prepare', 'run', 'check'])
@@ -98,7 +104,7 @@ def main():
         for cmd, cwd in commands:
             print(shlex.join(cmd), flush=True)
             if not a.dry_run:
-                subprocess.run(cmd, cwd=cwd, check=True)
+                subprocess.run(cmd, cwd=cwd, check=True, env=runtime_environment(dotnet))
         if not a.dry_run:
             stamp.parent.mkdir(parents=True, exist_ok=True)
             stamp.write_text(json.dumps({'artifacts': artifacts(rust), 'sources': sources(rust)}, indent=2))
@@ -136,7 +142,7 @@ def main():
         provenance[label + '_revision'] = subprocess.check_output(['git', 'rev-parse', 'HEAD'], cwd=repo, text=True).strip()
         provenance[label + '_status'] = subprocess.check_output(['git', 'status', '--porcelain'], cwd=repo, text=True)
     try:
-        completed = subprocess.run(cmd, cwd=ROOT)
+        completed = subprocess.run(cmd, cwd=ROOT, env=runtime_environment(dotnet))
     except KeyboardInterrupt:
         completed = subprocess.CompletedProcess(cmd, 130)
     if output.exists():

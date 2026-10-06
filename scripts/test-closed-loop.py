@@ -14,6 +14,13 @@ spec.loader.exec_module(launcher)
 class LauncherTests(unittest.TestCase):
     def run_command(self,*args):
         return subprocess.run([str(SCRIPT),*args],capture_output=True,text=True)
+    def test_coordinator_and_children_share_selected_dotnet_host(self):
+        from unittest.mock import patch
+        with patch.dict(launcher.os.environ, {'DOTNET_HOST_PATH': '/old/dotnet', 'HOME': '/root'}):
+            env=launcher.runtime_environment('/selected/dotnet')
+            self.assertEqual('/selected/dotnet',env['DOTNET_HOST_PATH'])
+            self.assertEqual('/old/dotnet',launcher.os.environ['DOTNET_HOST_PATH'])
+            self.assertEqual('/root',env['HOME'])
     def test_defaults_and_no_credentials(self):
         r=self.run_command('run','--dry-run')
         self.assertEqual(0,r.returncode,r.stderr)
