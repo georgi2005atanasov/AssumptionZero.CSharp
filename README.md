@@ -5,10 +5,16 @@ flow for each exchange instrument. An instrument's configuration, order book,
 signals, inventory, and quote decisions stay together, making the path from an
 incoming update to a decision easier to follow.
 
-The second aim is to compare **C# and Rust on the same hot path**: identical market
-messages, strategy rules, and starting state, with correctness checked before
+The second aim is to compare **C# and [Rust](https://github.com/georgi2005atanasov/assumption_zero)
+on the same hot path**: identical market messages, strategy rules, and starting
+state, with correctness checked before
 interpreting latency, CPU, allocation, or memory results. This is a working
 processing prototype; it produces quote intents but does not submit orders.
+
+C# is already optimized around bounded arrays, reusable buffers, and a single
+market processing loop, with tests for zero managed allocations in warmed core
+processing. A smaller Rust process footprint is useful when it addresses a real
+resource constraint; it is not, by itself, a reason to replace the C# application.
 
 ## Architecture
 
@@ -198,10 +204,11 @@ Both applications use the C# simulator. See [the comparison runbook](docs/testin
 for build scripts, paired runs, CPU affinity, and report interpretation, and
 [the report schema](docs/benchmark-schema.md) for field definitions.
 
-The C# default list currently contains **BTCUSDT, ETHUSDT, BNBUSDT, SOLUSDT, XRPUSDT**
-in `AssumptionZero.App/Program.cs`. Rust's `src/symbols.json` currently contains 100
-symbols. Align the lists before fixture-free comparisons. With a shared fixture,
-both applications use its instruments; the bundled BTC fixture is for the demo only.
+Both applications default to the same **100 symbols in the same order**, defined
+in C#'s `AssumptionZero.App/Program.cs` and Rust's `src/symbols.json`. Keep the lists
+and their order aligned when changing the workload for fixture-free comparisons.
+With a shared fixture, both applications use its instruments; the bundled BTC
+fixture is for the demo only.
 
 Replay without a fixture estimates balances, instrument rules, and starting books.
 It exercises processing performance but cannot reconstruct historical strategy
@@ -215,3 +222,51 @@ To enable the Rust integration tests after building its Release executable:
 export RUST_APP_TEST='/absolute/path/to/assumption-zero/target/release/assumption-zero'
 dotnet test AssumptionZero.Tests/AssumptionZero.Tests.csproj -c Release --no-build
 ```
+
+## What the recorded comparison shows
+
+The accepted session on **2 October 2026 at 19:39 UTC** used the same 300,000
+recorded messages, five measured runs per language in alternating order, and the
+same application CPU. Each replay was paced to 60 seconds; the first 30,000
+messages were excluded as warm-up. Both applications completed all runs and
+matched the checked decision and final-state hashes. Values below are medians
+of five per-run measurements.
+
+| Measurement | C# | Rust |
+| --- | ---: | ---: |
+| Process CPU time over about 54.35 measured seconds | 26.44 s | 5.28 s |
+| Resident memory after replay, before reporting | 121.16 MiB | 59.32 MiB |
+| Frame-processing P99 | 20.335 µs | 20.350 µs |
+| Send-to-decision P99 | 367.368 µs | 340.990 µs |
+
+Rust used **80% less process CPU and 51% less resident memory in this session**.
+In absolute terms, that is about **0.39 of one CPU core on average and 62 MiB of
+RAM** at the tested load. Frame-processing P99 was essentially tied; C# had lower
+book-update, signal, and quote-stage P99 values. Rust's lower median
+send-to-decision P99 had overlapping run ranges with C#, so it does not establish
+a consistent latency advantage.
+
+C# is an optimized implementation, and its larger measured process footprint
+does not make it a worse choice. Process CPU includes transport, runtime, and
+instrumentation work outside the trading calculations. The cause of the CPU gap
+has not been established, and there were no measured C# GC collections or pauses.
+Memory includes runtime state and benchmark buffers. The older 77% memory-saving
+claim was withdrawn because sampling phases differed; the 51% figure uses the
+corrected measurement boundary.
+
+These results describe the saved builds and configuration. Both benchmark
+applications had 100 configured instruments, matching the current default lists,
+with only 5 ready at the end. The workload used synthetic starting state. Maximum
+throughput, instrumentation CPU overhead, and production resource savings remain
+unestablished.
+
+The Rust result is promising, but this benchmark alone does not justify a rewrite.
+If the C# application meets its latency and resource budgets, retaining it is a
+reasonable choice. Profile the CPU difference and test representative workloads
+before deciding whether the smaller footprint is worth migration and maintenance
+costs.
+
+Evidence: `docs/benchmark-accepted-2026-10-02.md` and
+`benchmark-results/20261002T193939Z-simulator-compare-9g2o0V/`. The paired JSON,
+per-run summaries, and sample CSVs are the source of these figures. Follow
+[the comparison runbook](docs/testing.md) for a new controlled comparison.
