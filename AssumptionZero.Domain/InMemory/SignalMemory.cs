@@ -1,9 +1,5 @@
 namespace AssumptionZero.Domain.InMemory;
 
-public readonly record struct TimedValue(long TimeNs, double Value);
-
-public readonly record struct PendingMarkout(long DueNs, long FillPriceTicks, int Side);
-
 /// <summary>Preallocated event-time history owned by one instrument writer.</summary>
 public struct SignalMemory
 {
@@ -18,7 +14,6 @@ public struct SignalMemory
     private double ofiSum, ofiAbsoluteSum;
     private long firstMidTime;
     private bool hasFirstMid;
-
     public bool Faulted { get; private set; }
     public bool Warm { get; private set; }
 
@@ -55,8 +50,14 @@ public struct SignalMemory
         }
 
         Expire(trades, ref tradeHead, ref tradeCount, timeNs - config.TradeFlowWindowNs);
-        if (!Append(trades, ref tradeHead, ref tradeCount,
-                new TimedValue(timeNs, aggressiveBuy ? quantity : -quantity))) Faulted = true;
+        if (!Append(
+            trades,
+            ref tradeHead,
+            ref tradeCount,
+            new TimedValue(timeNs, aggressiveBuy ? quantity : -quantity)))
+        {
+            Faulted = true;
+        }
     }
 
     public void UpdateTradeFlow(long timeNs, in HotConfig config, ref SignalState state)
@@ -66,8 +67,14 @@ public struct SignalMemory
         for (int i = 0; i < tradeCount; i++)
         {
             double value = trades[(tradeHead + i) % trades.Length].Value;
-            if (value > 0) buyVolume += value;
-            else sellVolume -= value;
+            if (value > 0)
+            {
+                buyVolume += value;
+            }
+            else
+            {
+                sellVolume -= value;
+            }
         }
 
         state.TradeFlowImbalance = Ratio(buyVolume - sellVolume, buyVolume + sellVolume);
@@ -107,6 +114,26 @@ public struct SignalMemory
     public double UpdateBook(long timeNs, in OrderBook book, in HotConfig config, ref SignalState state)
     {
         double mid = ((double)book.Bids[0].PriceTicks + book.Asks[0].PriceTicks) * 0.5;
+        UpdateMidHistory(timeNs, mid, config);
+        var (weightedBid, weightedAsk) = UpdateBookImbalance(book, config, ref state);
+        UpdateLiquidity(timeNs, weightedBid, weightedAsk, config, ref state);
+        UpdateTradeFlow(timeNs, config, ref state);
+        UpdateMomentum(timeNs, mid, config, ref state);
+        UpdateVolatility(timeNs, mid, config, ref state);
+        ResolveMarkouts(timeNs, config.TradeFlowWindowNs);
+        double loss = 0;
+        for (int i = 0; i < lossCount; i++)
+        {
+            loss += losses[(lossHead + i) % losses.Length].Value;
+        }
+
+        Warm = hasFirstMid && timeNs - firstMidTime >= config.MomentumWindowNs && ofiCount == ofi.Length &&
+            liquidityCount > 0;
+        return lossCount == 0 ? 0 : Math.Clamp(loss / lossCount / config.AdverseScaleTicks, 0, 1);
+    }
+
+    private void UpdateMidHistory(long timeNs, double mid, in HotConfig config)
+    {
         if (!hasFirstMid)
         {
             firstMidTime = timeNs;
@@ -115,8 +142,14 @@ public struct SignalMemory
 
         long keepMid = Math.Max(config.MomentumWindowNs, config.VolatilityWindowNs);
         ExpireKeepingPredecessor(mids, ref midHead, ref midCount, timeNs - keepMid);
-        if (!Append(mids, ref midHead, ref midCount, new TimedValue(timeNs, mid))) Faulted = true;
+        if (!Append(mids, ref midHead, ref midCount, new TimedValue(timeNs, mid)))
+        {
+            Faulted = true;
+        }
+    }
 
+    private (double Bid, double Ask) UpdateBookImbalance(in OrderBook book, in HotConfig config, ref SignalState state)
+    {
         double bestBid = book.Bids[0].Quantity, bestAsk = book.Asks[0].Quantity;
         state.MicroSignal = Ratio(bestBid - bestAsk, bestBid + bestAsk);
         double weightedBid = 0, weightedAsk = 0;
@@ -129,34 +162,62 @@ public struct SignalMemory
         state.MultiLevelImbalance = Ratio(weightedBid - weightedAsk, weightedBid + weightedAsk);
         state.OrderFlowImbalance = Ratio(ofiSum, ofiAbsoluteSum);
         state.LiquidityUnits = (long)Math.Min(weightedBid, weightedAsk);
+        return (weightedBid, weightedAsk);
+    }
 
+    private void UpdateLiquidity(long timeNs, double weightedBid, double weightedAsk, in HotConfig config,
+        ref SignalState state)
+    {
         Expire(liquidity, ref liquidityHead, ref liquidityCount, timeNs - config.LiquidityWindowNs);
-        if (!Append(liquidity, ref liquidityHead, ref liquidityCount,
-                new TimedValue(timeNs, Math.Min(weightedBid, weightedAsk)))) Faulted = true;
+        if (!Append(
+            liquidity,
+            ref liquidityHead,
+            ref liquidityCount,
+            new TimedValue(timeNs, Math.Min(weightedBid, weightedAsk))))
+        {
+            Faulted = true;
+        }
+
         double depthSum = 0;
-        for (int i = 0; i < liquidityCount; i++) depthSum += liquidity[(liquidityHead + i) % liquidity.Length].Value;
+        for (int i = 0; i < liquidityCount; i++)
+        {
+            depthSum += liquidity[(liquidityHead + i) % liquidity.Length].Value;
+        }
+
         double depthMean = liquidityCount == 0 ? 0 : depthSum / liquidityCount;
         state.LiquidityRatio = depthMean > 0 ? Math.Clamp(Math.Min(weightedBid, weightedAsk) / depthMean, 0, 1) : 0;
+    }
 
-        UpdateTradeFlow(timeNs, config, ref state);
-
+    private void UpdateMomentum(long timeNs, double mid, in HotConfig config, ref SignalState state)
+    {
         double olderMid = mid;
         long momentumCutoff = timeNs - config.MomentumWindowNs;
         for (int i = 0; i < midCount; i++)
         {
             TimedValue sample = mids[(midHead + i) % mids.Length];
-            if (sample.TimeNs > momentumCutoff) break;
+            if (sample.TimeNs > momentumCutoff)
+            {
+                break;
+            }
+
             olderMid = sample.Value;
         }
 
         state.MomentumSignal = Math.Clamp((mid - olderMid) / config.MomentumScaleTicks, -1, 1);
+    }
 
+    private void UpdateVolatility(long timeNs, double mid, in HotConfig config, ref SignalState state)
+    {
         double sum = 0, sumSq = 0;
         int n = 0;
         for (int i = 0; i < midCount; i++)
         {
             TimedValue sample = mids[(midHead + i) % mids.Length];
-            if (sample.TimeNs < timeNs - config.VolatilityWindowNs) continue;
+            if (sample.TimeNs < timeNs - config.VolatilityWindowNs)
+            {
+                continue;
+            }
+
             double delta = sample.Value - mid;
             sum += delta;
             sumSq += delta * delta;
@@ -164,13 +225,6 @@ public struct SignalMemory
         }
 
         state.VolatilityTicks = n > 0 ? Math.Sqrt(Math.Max(0, sumSq / n - (sum / n) * (sum / n))) : 0;
-
-        ResolveMarkouts(timeNs, config.TradeFlowWindowNs);
-        double loss = 0;
-        for (int i = 0; i < lossCount; i++) loss += losses[(lossHead + i) % losses.Length].Value;
-        Warm = hasFirstMid && timeNs - firstMidTime >= config.MomentumWindowNs &&
-               ofiCount == ofi.Length && liquidityCount > 0;
-        return lossCount == 0 ? 0 : Math.Clamp(loss / lossCount / config.AdverseScaleTicks, 0, 1);
     }
 
     private void ResolveMarkouts(long timeNs, long lossWindowNs)
@@ -190,7 +244,11 @@ public struct SignalMemory
             for (int j = 0; j < midCount; j++)
             {
                 TimedValue sample = mids[(midHead + j) % mids.Length];
-                if (sample.TimeNs < pending.DueNs) continue;
+                if (sample.TimeNs < pending.DueNs)
+                {
+                    continue;
+                }
+
                 markMid = sample.Value;
                 found = true;
                 break;
@@ -203,8 +261,11 @@ public struct SignalMemory
             }
 
             double markout = pending.Side * (markMid - pending.FillPriceTicks);
-            if (!Append(losses, ref lossHead, ref lossCount,
-                    new TimedValue(timeNs, Math.Max(0, -markout)))) Faulted = true;
+            if (!Append(losses, ref lossHead, ref lossCount, new TimedValue(timeNs, Math.Max(0, -markout))))
+            {
+                Faulted = true;
+            }
+
             markouts[i] = markouts[--markoutCount];
         }
     }
@@ -213,7 +274,11 @@ public struct SignalMemory
 
     private static bool Append(TimedValue[] ring, ref int head, ref int count, TimedValue value)
     {
-        if (count == ring.Length) return false;
+        if (count == ring.Length)
+        {
+            return false;
+        }
+
         ring[(head + count++) % ring.Length] = value;
         return true;
     }

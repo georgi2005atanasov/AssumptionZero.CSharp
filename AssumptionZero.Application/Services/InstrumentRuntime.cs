@@ -32,7 +32,6 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private OrderStatus priorBidStatus, priorAskStatus;
     private long replacementBidPrice, replacementAskPrice, replacementBidQuantity, replacementAskQuantity;
     private long observedBidPrice, observedBidQuantity, observedAskPrice, observedAskQuantity;
-
     public Instrument Instrument { get; set; }
     public OrderBook OrderBook { get => book; set => book = value; }
     public SignalState Signals { get => signals; set => signals = value; }
@@ -49,8 +48,14 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public long LastSignalTicks { get; private set; }
     public long LastQuoteTicks { get; private set; }
 
-    public InstrumentRuntime(Instrument instrument, in HotConfig config, AccountRiskLedger account,
-        long targetQuantity, long maxLongQuantity, long maxShortQuantity = 0, IStrategy? strategy = null,
+    public InstrumentRuntime(
+        Instrument instrument,
+        in HotConfig config,
+        AccountRiskLedger account,
+        long targetQuantity,
+        long maxLongQuantity,
+        long maxShortQuantity = 0,
+        IStrategy? strategy = null,
         bool estimateBookFromFeed = false)
     {
         Instrument = instrument;
@@ -62,10 +67,15 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             estimatedBids = new BookLevel[estimatedLevels];
             estimatedAsks = new BookLevel[estimatedLevels];
         }
+
         this.account = account;
         baseAsset = account.FindAsset(instrument.BaseAsset);
         quoteAsset = account.FindAsset(instrument.QuoteAsset);
-        if (baseAsset < 0 || quoteAsset < 0) throw new ArgumentException("Instrument assets must exist in account ledger.");
+        if (baseAsset < 0 || quoteAsset < 0)
+        {
+            throw new ArgumentException("Instrument assets must exist in account ledger.");
+        }
+
         book = new OrderBook(5_000);
         memory = new SignalMemory(config);
         inventory = new InventoryState
@@ -81,20 +91,33 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     {
         memory.Reset();
         lastEventNs = 0;
-        return book.LoadSnapshot(bids, asks, updateId) &&
-               book.BidCount >= config.BookLevels && book.AskCount >= config.BookLevels;
+        return book.LoadSnapshot(bids, asks, updateId) && book.BidCount >= config.BookLevels &&
+            book.AskCount >= config.BookLevels;
     }
 
     /// <summary>Choose estimated price and quantity units from the first observed SBE scales.</summary>
     public void SetEstimatedBookPrecision(sbyte priceExponent, sbyte quantityExponent)
     {
-        if (!estimateBookFromFeed || estimatedPrecisionInitialized) return;
+        if (!estimateBookFromFeed || estimatedPrecisionInitialized)
+        {
+            return;
+        }
+
         decimal tick = DecimalPowerOfTen(priceExponent);
         decimal step = DecimalPowerOfTen(quantityExponent);
         Instrument original = Instrument;
-        var scaled = new Instrument(original.Id, original.Symbol, original.BaseAsset, original.QuoteAsset,
-            tick, step, step, original.MaxQuantity, original.MinNotional,
-            original.MinPrice, original.MaxPrice);
+        var scaled = new Instrument(
+            original.Id,
+            original.Symbol,
+            original.BaseAsset,
+            original.QuoteAsset,
+            tick,
+            step,
+            step,
+            original.MaxQuantity,
+            original.MinNotional,
+            original.MinPrice,
+            original.MaxPrice);
         long target = scaled.ToQuantityUnits(100m);
         long maxLong = checked(target + config.BaseQuantity * 10);
         Instrument = scaled;
@@ -108,23 +131,45 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     private static decimal DecimalPowerOfTen(sbyte exponent)
     {
         if (exponent is < -28 or > 28)
+        {
             throw new InvalidDataException($"Unsupported SBE exponent {exponent} for estimated replay book.");
+        }
+
         decimal value = 1m;
         if (exponent < 0)
-            for (int i = 0; i < -exponent; i++) value /= 10m;
+        {
+            for (int i = 0; i < -exponent; i++)
+            {
+                value /= 10m;
+            }
+        }
         else
-            for (int i = 0; i < exponent; i++) value *= 10m;
+        {
+            for (int i = 0; i < exponent; i++)
+            {
+                value *= 10m;
+            }
+        }
+
         return value;
     }
 
     public bool BeginDepth(long firstId, long lastId)
     {
         diffOpen = false;
-        bool validSequence = estimateBookFromFeed ?
-            book.IsSynchronized && firstId > 0 && lastId >= firstId :
-            book.CanApply(firstId, lastId);
-        if (!validSequence) { book.Invalidate(); return false; }
-        if (lastId <= book.LastUpdateId) return false;
+        bool validSequence = estimateBookFromFeed ? book.IsSynchronized && firstId > 0 &&
+            lastId >= firstId : book.CanApply(firstId, lastId);
+        if (!validSequence)
+        {
+            book.Invalidate();
+            return false;
+        }
+
+        if (lastId <= book.LastUpdateId)
+        {
+            return false;
+        }
+
         priorBid = book.Bids[0].PriceTicks;
         priorAsk = book.Asks[0].PriceTicks;
         priorBidQuantity = book.Bids[0].Quantity;
@@ -135,16 +180,28 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     }
 
     /// <summary>Performance replay only: estimate bounded depth from an observed top quote.</summary>
-    public bool SeedEstimatedBook(long bidPrice, long bidQuantity, long askPrice, long askQuantity,
-        long updateId)
+    public bool SeedEstimatedBook(long bidPrice, long bidQuantity, long askPrice, long askQuantity, long updateId)
     {
         if (!estimateBookFromFeed || book.IsSynchronized || updateId <= 0 || bidPrice <= estimatedBids!.Length ||
-            askPrice <= bidPrice || bidQuantity <= 0 || askQuantity <= 0) return false;
+            askPrice <= bidPrice || bidQuantity <= 0 || askQuantity <= 0)
+        {
+            return false;
+        }
+
         for (int i = 0; i < estimatedBids.Length; i++)
         {
-            estimatedBids[i] = new BookLevel { PriceTicks = bidPrice - i, Quantity = bidQuantity };
-            estimatedAsks![i] = new BookLevel { PriceTicks = askPrice + i, Quantity = askQuantity };
+            estimatedBids[i] = new BookLevel
+            {
+                PriceTicks = bidPrice - i,
+                Quantity = bidQuantity
+            };
+            estimatedAsks![i] = new BookLevel
+            {
+                PriceTicks = askPrice + i,
+                Quantity = askQuantity
+            };
         }
+
         observedBidPrice = bidPrice;
         observedBidQuantity = bidQuantity;
         observedAskPrice = askPrice;
@@ -154,29 +211,48 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
 
     public bool ObserveDepthForEstimatedBook(bool bid, long price, long quantity, long updateId)
     {
-        if (!estimateBookFromFeed || book.IsSynchronized || price <= 0 || quantity <= 0) return false;
+        if (!estimateBookFromFeed || book.IsSynchronized || price <= 0 || quantity <= 0)
+        {
+            return false;
+        }
+
         if (bid)
         {
-            if (price >= observedBidPrice) { observedBidPrice = price; observedBidQuantity = quantity; }
+            if (price >= observedBidPrice)
+            {
+                observedBidPrice = price;
+                observedBidQuantity = quantity;
+            }
         }
         else if (observedAskPrice == 0 || price <= observedAskPrice)
         {
             observedAskPrice = price;
             observedAskQuantity = quantity;
         }
-        return SeedEstimatedBook(observedBidPrice, observedBidQuantity,
-            observedAskPrice, observedAskQuantity, updateId);
+
+        return SeedEstimatedBook(observedBidPrice, observedBidQuantity, observedAskPrice, observedAskQuantity,
+            updateId);
     }
 
     public bool ApplyBid(long priceTicks, long quantity)
     {
-        if (!diffOpen || !book.ApplyBid(priceTicks, quantity)) { Invalidate(); return false; }
+        if (!diffOpen || !book.ApplyBid(priceTicks, quantity))
+        {
+            Invalidate();
+            return false;
+        }
+
         return true;
     }
 
     public bool ApplyAsk(long priceTicks, long quantity)
     {
-        if (!diffOpen || !book.ApplyAsk(priceTicks, quantity)) { Invalidate(); return false; }
+        if (!diffOpen || !book.ApplyAsk(priceTicks, quantity))
+        {
+            Invalidate();
+            return false;
+        }
+
         return true;
     }
 
@@ -189,13 +265,16 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             Invalidate();
             return InvalidDecision();
         }
+
         diffOpen = false;
         long time = Math.Max(lastEventNs, eventTimeNs);
         lastEventNs = time;
-        double bidOfi = book.Bids[0].PriceTicks > priorBid ? book.Bids[0].Quantity :
-            book.Bids[0].PriceTicks < priorBid ? -priorBidQuantity : book.Bids[0].Quantity - priorBidQuantity;
-        double askOfi = book.Asks[0].PriceTicks < priorAsk ? -book.Asks[0].Quantity :
-            book.Asks[0].PriceTicks > priorAsk ? priorAskQuantity : priorAskQuantity - book.Asks[0].Quantity;
+        double bidOfi = book.Bids[0].PriceTicks > priorBid
+            ? book.Bids[0].Quantity
+            : book.Bids[0].PriceTicks < priorBid ? -priorBidQuantity : book.Bids[0].Quantity - priorBidQuantity;
+        double askOfi = book.Asks[0].PriceTicks < priorAsk
+            ? -book.Asks[0].Quantity
+            : book.Asks[0].PriceTicks > priorAsk ? priorAskQuantity : priorAskQuantity - book.Asks[0].Quantity;
         memory.AddOfi(bidOfi + askOfi);
         adverseScore = memory.UpdateBook(time, book, config, ref signals);
         long quoteStart = BenchmarkStages ? Stopwatch.GetTimestamp() : 0;
@@ -205,6 +284,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             LastSignalTicks = quoteStart - stageStart;
             LastQuoteTicks = Stopwatch.GetTimestamp() - quoteStart;
         }
+
         return decision;
     }
 
@@ -222,6 +302,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             LastSignalTicks = quoteStart - stageStart;
             LastQuoteTicks = Stopwatch.GetTimestamp() - quoteStart;
         }
+
         return decision;
     }
 
@@ -229,15 +310,25 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     {
         inventory.CurrentQuantity = Instrument.ToQuantityUnits(account.Total(baseAsset));
         if (confirmPending && changedAsset == quoteAsset && pendingBidIntent > 0 && orders.BidOrder.OrderId > 0 &&
-            pendingBidAction == QuoteAction.Place) ClearIntent(true);
+            pendingBidAction == QuoteAction.Place)
+        {
+            ClearIntent(true);
+        }
+
         if (confirmPending && changedAsset == baseAsset && pendingAskIntent > 0 && orders.AskOrder.OrderId > 0 &&
-            pendingAskAction == QuoteAction.Place) ClearIntent(false);
+            pendingAskAction == QuoteAction.Place)
+        {
+            ClearIntent(false);
+        }
     }
 
     public void ConfigureInventory(long targetQuantity, long maxLongQuantity, long maxShortQuantity = 0)
     {
         if (maxLongQuantity < targetQuantity || maxShortQuantity < 0 || targetQuantity < -maxShortQuantity)
+        {
             throw new ArgumentOutOfRangeException(nameof(targetQuantity));
+        }
+
         inventory.TargetQuantity = targetQuantity;
         inventory.MaxLongQuantity = maxLongQuantity;
         inventory.MaxShortQuantity = maxShortQuantity;
@@ -258,7 +349,12 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
         RecalculateOutstanding();
     }
 
-    public void OnExecution(bool buy, long orderId, long cumulativeFilled, long fillPriceTicks, long eventTimeNs,
+    public void OnExecution(
+        bool buy,
+        long orderId,
+        long cumulativeFilled,
+        long fillPriceTicks,
+        long eventTimeNs,
         OrderStatus status)
     {
         ref WorkingOrder order = ref (buy ? ref orders.BidOrder : ref orders.AskOrder);
@@ -267,6 +363,7 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             Invalidate();
             return;
         }
+
         long delta = cumulativeFilled - order.FilledQuantity;
         order.FilledQuantity = cumulativeFilled;
         order.Status = status;
@@ -274,122 +371,315 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
             OrderStatus.New or OrderStatus.PartiallyFilled;
         if (!order.IsActive)
         {
-            long cancelHold = buy ? pendingBidCancelHold : pendingAskCancelHold;
-            if (cancelHold > 0) account.Release(cancelHold);
-            if (buy) pendingBidCancelHold = 0; else pendingAskCancelHold = 0;
-            QuoteAction pending = buy ? pendingBidAction : pendingAskAction;
-            if (pending == QuoteAction.Cancel || pending == QuoteAction.Replace && status != OrderStatus.Cancelled)
-                ClearIntent(buy);
+            ReleaseCompletedOrderIntent(buy, status);
         }
+
         if (!order.IsActive && status == OrderStatus.Cancelled &&
             (buy ? pendingBidAction : pendingAskAction) == QuoteAction.Replace)
         {
-            order = new WorkingOrder
-            {
-                PriceTicks = buy ? replacementBidPrice : replacementAskPrice,
-                Quantity = buy ? replacementBidQuantity : replacementAskQuantity,
-                Status = OrderStatus.PendingNew,
-                IsActive = true
-            };
-            if (buy) pendingBidAction = QuoteAction.Place; else pendingAskAction = QuoteAction.Place;
+            PrepareReplacementOrder(buy, ref order);
         }
+
         if (delta > 0)
         {
             inventory.CurrentQuantity += buy ? delta : -delta;
             memory.AddFill(eventTimeNs, fillPriceTicks, buy);
         }
+
         RecalculateOutstanding();
+    }
+
+    private void ReleaseCompletedOrderIntent(bool buy, OrderStatus status)
+    {
+        long cancelHold = buy ? pendingBidCancelHold : pendingAskCancelHold;
+        if (cancelHold > 0)
+        {
+            account.Release(cancelHold);
+        }
+
+        if (buy)
+        {
+            pendingBidCancelHold = 0;
+        }
+        else
+        {
+            pendingAskCancelHold = 0;
+        }
+
+        QuoteAction pending = buy ? pendingBidAction : pendingAskAction;
+        if (pending == QuoteAction.Cancel || pending == QuoteAction.Replace && status != OrderStatus.Cancelled)
+        {
+            ClearIntent(buy);
+        }
+    }
+
+    private void PrepareReplacementOrder(bool buy, ref WorkingOrder order)
+    {
+        order = new WorkingOrder
+        {
+            PriceTicks = buy ? replacementBidPrice : replacementAskPrice,
+            Quantity = buy ? replacementBidQuantity : replacementAskQuantity,
+            Status = OrderStatus.PendingNew,
+            IsActive = true
+        };
+        if (buy)
+        {
+            pendingBidAction = QuoteAction.Place;
+        }
+        else
+        {
+            pendingAskAction = QuoteAction.Place;
+        }
     }
 
     public QuoteDecision Evaluate()
     {
-        if (!Ready) return InvalidDecision();
-        return Strategy.Evaluate(Instrument, config, book, signals, inventory, orders, ref pricing,
-            adverseScore, account.MakerFeeRate, account.Free(baseAsset), account.Free(quoteAsset));
+        if (!Ready)
+        {
+            return InvalidDecision();
+        }
+
+        return Strategy.Evaluate(
+            Instrument,
+            config,
+            book,
+            signals,
+            inventory,
+            orders,
+            ref pricing,
+            adverseScore,
+            account.MakerFeeRate,
+            account.Free(baseAsset),
+            account.Free(quoteAsset));
     }
 
     /// <summary>Reserve shared funds only after a downstream consumer accepts a current intent.</summary>
     public bool TryAcceptIntent(bool buy, in QuoteDecision decision, out long intentId)
     {
         intentId = 0;
-        if ((buy ? pendingBidAction : pendingAskAction) != QuoteAction.None) return false;
+        if ((buy ? pendingBidAction : pendingAskAction) != QuoteAction.None)
+        {
+            return false;
+        }
+
         QuoteDecision current = Evaluate();
-        if (current != decision) return false;
+        if (current != decision)
+        {
+            return false;
+        }
+
         QuoteAction action = buy ? current.BidAction : current.AskAction;
         if (action is not (QuoteAction.Place or QuoteAction.Replace or QuoteAction.Cancel) ||
-            (action != QuoteAction.Cancel && !Ready)) return false;
+            (action != QuoteAction.Cancel && !Ready))
+        {
+            return false;
+        }
+
         ref WorkingOrder order = ref (buy ? ref orders.BidOrder : ref orders.AskOrder);
-        if (buy) { priorBidStatus = order.Status; pendingBidAction = action; }
-        else { priorAskStatus = order.Status; pendingAskAction = action; }
+        if (buy)
+        {
+            priorBidStatus = order.Status;
+            pendingBidAction = action;
+        }
+        else
+        {
+            priorAskStatus = order.Status;
+            pendingAskAction = action;
+        }
+
         if (action == QuoteAction.Cancel)
         {
-            if (!account.ReservePendingCancel(Instrument, buy, order.PriceTicks,
-                    Math.Max(0, order.Quantity - order.FilledQuantity), out long holdId))
-            {
-                if (buy) pendingBidAction = QuoteAction.None; else pendingAskAction = QuoteAction.None;
-                return false;
-            }
-            if (buy) pendingBidCancelHold = holdId; else pendingAskCancelHold = holdId;
-            order.Status = OrderStatus.PendingCancel;
-            intentId = holdId;
-            return true;
+            return TryReserveCancellation(buy, ref order, out intentId);
         }
+
+        return TryReservePlacement(buy, current, action, ref order, out intentId);
+    }
+
+    private bool TryReserveCancellation(bool buy, ref WorkingOrder order, out long intentId)
+    {
+        intentId = 0;
+        if (!account.ReservePendingCancel(
+            Instrument,
+            buy,
+            order.PriceTicks,
+            Math.Max(0, order.Quantity - order.FilledQuantity),
+            out long holdId))
+        {
+            if (buy)
+            {
+                pendingBidAction = QuoteAction.None;
+            }
+            else
+            {
+                pendingAskAction = QuoteAction.None;
+            }
+
+            return false;
+        }
+
+        if (buy)
+        {
+            pendingBidCancelHold = holdId;
+        }
+        else
+        {
+            pendingAskCancelHold = holdId;
+        }
+
+        order.Status = OrderStatus.PendingCancel;
+        intentId = holdId;
+        return true;
+    }
+
+    private bool TryReservePlacement(bool buy, in QuoteDecision current, QuoteAction action, ref WorkingOrder order,
+        out long intentId)
+    {
         long price = buy ? current.BidPriceTicks : current.AskPriceTicks;
         long quantity = buy ? current.BidQuantity : current.AskQuantity;
         if (!account.TryAccept(Instrument, buy, price, quantity, out intentId))
         {
-            if (buy) pendingBidAction = QuoteAction.None; else pendingAskAction = QuoteAction.None;
+            if (buy)
+            {
+                pendingBidAction = QuoteAction.None;
+            }
+            else
+            {
+                pendingAskAction = QuoteAction.None;
+            }
+
             return false;
         }
-        if (buy) pendingBidIntent = intentId; else pendingAskIntent = intentId;
-        if (action == QuoteAction.Replace)
+
+        if (buy)
         {
-            if (!account.ReservePendingCancel(Instrument, buy, order.PriceTicks,
-                    Math.Max(0, order.Quantity - order.FilledQuantity), out long holdId))
-            {
-                ClearIntent(buy);
-                intentId = 0;
-                return false;
-            }
-            if (buy) pendingBidCancelHold = holdId; else pendingAskCancelHold = holdId;
+            pendingBidIntent = intentId;
         }
+        else
+        {
+            pendingAskIntent = intentId;
+        }
+
+        if (action == QuoteAction.Replace && !TryReserveReplacementCancellation(buy, order, ref intentId))
+        {
+            return false;
+        }
+
+        SetPendingOrder(buy, action, price, quantity, ref order);
+        RecalculateOutstanding();
+        return true;
+    }
+
+    private bool TryReserveReplacementCancellation(bool buy, in WorkingOrder order, ref long intentId)
+    {
+        if (!account.ReservePendingCancel(
+            Instrument,
+            buy,
+            order.PriceTicks,
+            Math.Max(0, order.Quantity - order.FilledQuantity),
+            out long holdId))
+        {
+            ClearIntent(buy);
+            intentId = 0;
+            return false;
+        }
+
+        if (buy)
+        {
+            pendingBidCancelHold = holdId;
+        }
+        else
+        {
+            pendingAskCancelHold = holdId;
+        }
+
+        return true;
+    }
+
+    private void SetPendingOrder(bool buy, QuoteAction action, long price, long quantity, ref WorkingOrder order)
+    {
         if (action == QuoteAction.Place)
-            order = new WorkingOrder { PriceTicks = price, Quantity = quantity,
-                Status = OrderStatus.PendingNew, IsActive = true };
+        {
+            order = new WorkingOrder
+            {
+                PriceTicks = price,
+                Quantity = quantity,
+                Status = OrderStatus.PendingNew,
+                IsActive = true
+            };
+        }
         else
         {
             order.Status = OrderStatus.PendingCancel;
-            if (buy) { replacementBidPrice = price; replacementBidQuantity = quantity; }
-            else { replacementAskPrice = price; replacementAskQuantity = quantity; }
+            if (buy)
+            {
+                replacementBidPrice = price;
+                replacementBidQuantity = quantity;
+            }
+            else
+            {
+                replacementAskPrice = price;
+                replacementAskQuantity = quantity;
+            }
         }
-        RecalculateOutstanding();
-        return true;
     }
 
     public void RejectIntent(bool buy, long intentId)
     {
         QuoteAction action = buy ? pendingBidAction : pendingAskAction;
-        long expected = action == QuoteAction.Cancel ?
-            (buy ? pendingBidCancelHold : pendingAskCancelHold) :
-            (buy ? pendingBidIntent : pendingAskIntent);
-        if (action == QuoteAction.None || expected != intentId) return;
+        long expected = action == QuoteAction.Cancel
+            ? (buy ? pendingBidCancelHold : pendingAskCancelHold)
+            : (buy ? pendingBidIntent : pendingAskIntent);
+        if (action == QuoteAction.None || expected != intentId)
+        {
+            return;
+        }
+
         ref WorkingOrder order = ref (buy ? ref orders.BidOrder : ref orders.AskOrder);
-        if (action == QuoteAction.Place) order = default;
-        else order.Status = buy ? priorBidStatus : priorAskStatus;
+        if (action == QuoteAction.Place)
+        {
+            order = default;
+        }
+        else
+        {
+            order.Status = buy ? priorBidStatus : priorAskStatus;
+        }
+
         ClearIntent(buy);
         long cancelHold = buy ? pendingBidCancelHold : pendingAskCancelHold;
-        if (cancelHold > 0) account.Release(cancelHold);
-        if (buy) pendingBidCancelHold = 0; else pendingAskCancelHold = 0;
+        if (cancelHold > 0)
+        {
+            account.Release(cancelHold);
+        }
+
+        if (buy)
+        {
+            pendingBidCancelHold = 0;
+        }
+        else
+        {
+            pendingAskCancelHold = 0;
+        }
+
         RecalculateOutstanding();
     }
 
-    /// <summary>Bind an accepted place or replacement to the exchange order ID before execution events are trusted.</summary>
+    /// <summary>
+    /// Bind an accepted place or replacement to the exchange order ID before execution events are trusted.
+    /// </summary>
     public bool AcknowledgeOrderId(bool buy, long intentId, long orderId)
     {
         if (orderId <= 0 || (buy ? pendingBidIntent : pendingAskIntent) != intentId ||
-            (buy ? pendingBidAction : pendingAskAction) != QuoteAction.Place) return false;
+            (buy ? pendingBidAction : pendingAskAction) != QuoteAction.Place)
+        {
+            return false;
+        }
+
         ref WorkingOrder order = ref (buy ? ref orders.BidOrder : ref orders.AskOrder);
-        if (!order.IsActive || order.Status != OrderStatus.PendingNew || order.OrderId != 0) return false;
+        if (!order.IsActive || order.Status != OrderStatus.PendingNew || order.OrderId != 0)
+        {
+            return false;
+        }
+
         order.OrderId = orderId;
         return true;
     }
@@ -397,16 +687,31 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
     public void ConfirmIntent(bool buy, long intentId)
     {
         if ((buy ? pendingBidIntent : pendingAskIntent) != intentId)
+        {
             throw new InvalidOperationException("Acknowledgement does not match pending intent.");
+        }
+
         ClearIntent(buy);
     }
 
     private void ClearIntent(bool buy)
     {
         long id = buy ? pendingBidIntent : pendingAskIntent;
-        if (id > 0) account.Release(id);
-        if (buy) { pendingBidIntent = 0; pendingBidAction = QuoteAction.None; }
-        else { pendingAskIntent = 0; pendingAskAction = QuoteAction.None; }
+        if (id > 0)
+        {
+            account.Release(id);
+        }
+
+        if (buy)
+        {
+            pendingBidIntent = 0;
+            pendingBidAction = QuoteAction.None;
+        }
+        else
+        {
+            pendingAskIntent = 0;
+            pendingAskAction = QuoteAction.None;
+        }
     }
 
     public void Invalidate()
@@ -417,15 +722,19 @@ public sealed class InstrumentRuntime : IInstrumentRuntime
 
     private void RecalculateOutstanding()
     {
-        inventory.ReservedBuyQuantity = orders.BidOrder.IsActive ?
-            Math.Max(0, orders.BidOrder.Quantity - orders.BidOrder.FilledQuantity) : 0;
-        inventory.ReservedSellQuantity = orders.AskOrder.IsActive ?
-            Math.Max(0, orders.AskOrder.Quantity - orders.AskOrder.FilledQuantity) : 0;
+        inventory.ReservedBuyQuantity = orders.BidOrder.IsActive ? Math.Max(0,
+            orders.BidOrder.Quantity - orders.BidOrder.FilledQuantity) : 0;
+        inventory.ReservedSellQuantity = orders.AskOrder.IsActive ? Math.Max(0,
+            orders.AskOrder.Quantity - orders.AskOrder.FilledQuantity) : 0;
     }
 
-    private QuoteDecision InvalidDecision() => new(0, 0,
-        orders.BidOrder.IsActive && orders.BidOrder.Status != OrderStatus.PendingCancel ?
-            QuoteAction.Cancel : QuoteAction.None,
-        0, 0, orders.AskOrder.IsActive && orders.AskOrder.Status != OrderStatus.PendingCancel ?
-            QuoteAction.Cancel : QuoteAction.None);
+    private QuoteDecision InvalidDecision() => new(
+        0,
+        0,
+        orders.BidOrder.IsActive &&
+            orders.BidOrder.Status != OrderStatus.PendingCancel ? QuoteAction.Cancel : QuoteAction.None,
+        0,
+        0,
+        orders.AskOrder.IsActive &&
+            orders.AskOrder.Status != OrderStatus.PendingCancel ? QuoteAction.Cancel : QuoteAction.None);
 }

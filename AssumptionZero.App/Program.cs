@@ -1,12 +1,22 @@
-﻿using AssumptionZero.App;
+using AssumptionZero.Application.Interfaces.Services;
+using AssumptionZero.App;
 using AssumptionZero.Infrastructure;
 
 if (Environment.GetEnvironmentVariable("EXECUTION_MODE") == "SimulatedExchange")
 {
     using var simStop = new CancellationTokenSource();
-    Console.CancelKeyPress += (_, e) => { e.Cancel = true; simStop.Cancel(); };
-    await ClosedLoopClient.Run(Environment.GetEnvironmentVariable("SIM_EXCHANGE_URL") ?? throw new ArgumentException("SIM_EXCHANGE_URL required"),
-        Environment.GetEnvironmentVariable("SIM_OUTPUT") ?? throw new ArgumentException("SIM_OUTPUT required"), simStop.Token);
+    Console.CancelKeyPress += (_, e) =>
+    {
+        e.Cancel = true;
+        simStop.Cancel();
+    };
+    IClosedLoopClient client = new ClosedLoopClient();
+    await client.Run(
+        Environment.GetEnvironmentVariable("SIM_EXCHANGE_URL")
+            ?? throw new ArgumentException("SIM_EXCHANGE_URL required"),
+        Environment.GetEnvironmentVariable("SIM_OUTPUT")
+            ?? throw new ArgumentException("SIM_OUTPUT required"),
+        simStop.Token);
     return;
 }
 
@@ -56,7 +66,7 @@ string[] symbols =
 
 try
 {
-    var router = new ExecutionRouter();
+    IExecutionRouter router = new ExecutionRouter();
     switch (mode)
     {
         case ExecutionMode.SeedData:

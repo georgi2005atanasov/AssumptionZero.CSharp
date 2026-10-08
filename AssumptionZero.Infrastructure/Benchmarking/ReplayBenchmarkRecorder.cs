@@ -12,6 +12,7 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
     private readonly FrameSample[] frames;
     private readonly int warmupFrames;
     private readonly GcPauseListener? gcListener;
+
     private readonly Process process = Process.GetCurrentProcess();
     private long startCpuTicks, startAllocated, startGcPauseTicks;
     private readonly int[] startGcCounts = new int[3];
@@ -23,32 +24,54 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
     public ReplayBenchmarkRecorder(int expectedFrames, int warmupFrames, bool diagnostic)
     {
         if (expectedFrames <= 0 || warmupFrames < 0 || warmupFrames >= expectedFrames)
+        {
             throw new ArgumentOutOfRangeException(nameof(expectedFrames));
+        }
+
         frames = new FrameSample[expectedFrames];
         this.warmupFrames = warmupFrames;
-        if (diagnostic) gcListener = new GcPauseListener();
-        if (warmupFrames == 0) CaptureStart();
+        if (diagnostic)
+        {
+            gcListener = new GcPauseListener();
+        }
+
+        if (warmupFrames == 0)
+        {
+            CaptureStart();
+        }
     }
 
     public int Count => count;
 
     public void BeginFrame(WebSocketMessageType type, int bytes, long receiveTicks)
     {
-        if (count == frames.Length) throw new InvalidDataException("Received more frames than expected.");
+        if (count == frames.Length)
+        {
+            throw new InvalidDataException("Received more frames than expected.");
+        }
+
         frames[count] = new FrameSample
         {
-            Index = ++count, MessageType = type, Bytes = bytes, ReceiveTicks = receiveTicks
+            Index = ++count,
+            MessageType = type,
+            Bytes = bytes,
+            ReceiveTicks = receiveTicks
         };
     }
 
     public void EndFrame()
     {
         frames[count - 1].ProcessingEndTicks = Stopwatch.GetTimestamp();
-        if (count == warmupFrames) CaptureStart();
+        if (count == warmupFrames)
+        {
+            CaptureStart();
+        }
     }
 
     public void SetTemplate(int templateId) => frames[count - 1].TemplateId = templateId;
+
     public void AddDecode(long ticks) => frames[count - 1].DecodeTicks += ticks;
+
     public void AddBook(long ticks) => frames[count - 1].BookTicks += ticks;
 
     public void AddSignalAndQuote(long signalTicks, long quoteTicks)
@@ -85,12 +108,83 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         startCpuTicks = process.TotalProcessorTime.Ticks;
         startAllocated = GC.GetTotalAllocatedBytes(false);
         startGcPauseTicks = GC.GetTotalPauseDuration().Ticks;
-        for (int i = 0; i < 3; i++) startGcCounts[i] = GC.CollectionCount(i);
+        for (int i = 0; i < 3; i++)
+        {
+            startGcCounts[i] = GC.CollectionCount(i);
+        }
     }
 
     public BenchmarkAppReport Finish(bool completed)
     {
-        if (baseUtcTicks == 0) CaptureStart();
+        ReplayResourceSnapshot resources = CaptureResources();
+        FrameSample[] recorded = frames.AsSpan(0, count).ToArray();
+        long finishUtcTicks = DateTime.UtcNow.Ticks;
+        var pauses = gcListener?.Pauses.Where(p => p.EndUtcTicks >= baseUtcTicks &&
+            p.StartUtcTicks <= finishUtcTicks).ToArray() ?? [];
+        MarkGcOverlaps(recorded, pauses);
+        ReplaySampleSummary samples = SummarizeSamples(recorded);
+        long durationNs = samples.MeasuredCount == 0
+            ? 0
+            : NanosecondTime.FromTicks(
+                recorded[^1].ProcessingEndTicks - recorded[warmupFrames].ReceiveTicks,
+                Stopwatch.Frequency);
+        long[] pauseDurations = pauses.Select(p => Math.Max(0, p.EndUtcTicks - p.StartUtcTicks) * 100).ToArray();
+        return CreateReport(completed, resources, samples, recorded, pauses, durationNs, pauseDurations);
+    }
+
+    private BenchmarkAppReport CreateReport(
+        bool completed,
+        in ReplayResourceSnapshot resources,
+        in ReplaySampleSummary samples,
+        FrameSample[] recorded,
+        GcPause[] pauses,
+        long durationNs,
+        long[] pauseDurations)
+    {
+        return new BenchmarkAppReport(
+            3,
+            completed,
+            Stopwatch.Frequency,
+            warmupFrames,
+            count,
+            totalDecisions,
+            decisionHash.ToString("x16"),
+            samples.MeasuredCount,
+            samples.MeasuredDecisions,
+            samples.MeasuredBytes,
+            durationNs,
+            LatencySummary.From(samples.Processing, samples.Processing.Length),
+            LatencySummary.From(samples.ReceiveToDecision, samples.WithDecision),
+            SummarizeStage(recorded, f => f.DecodeTicks),
+            SummarizeStage(recorded, f => f.BookTicks),
+            SummarizeStage(recorded, f => f.SignalTicks),
+            SummarizeStage(recorded, f => f.QuoteTicks),
+            resources.CpuTicks * 100L,
+            durationNs == 0 ? 0 : resources.CpuTicks * 100.0 / durationNs,
+            samples.MeasuredCount == 0 ? 0 : resources.CpuTicks * 100.0 / samples.MeasuredCount,
+            resources.ResidentBytes,
+            resources.PeakResidentBytes,
+            resources.ManagedHeapBytes,
+            resources.Allocated,
+            samples.MeasuredCount == 0 ? 0 : (double)resources.Allocated / samples.MeasuredCount,
+            resources.GcCounts,
+            resources.GcPauseTicks * 100L,
+            LatencySummary.From(pauseDurations, pauseDurations.Length),
+            gcListener is not null,
+            pauses,
+            recorded)
+        {
+            MemorySnapshotPhase = "after_replay_before_report"
+        };
+    }
+
+    private ReplayResourceSnapshot CaptureResources()
+    {
+        if (baseUtcTicks == 0)
+        {
+            CaptureStart();
+        }
+
         process.Refresh();
         long cpuTicks = process.TotalProcessorTime.Ticks - startCpuTicks;
         long allocated = GC.GetTotalAllocatedBytes(false) - startAllocated;
@@ -100,20 +194,27 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         long peakResidentBytes = process.PeakWorkingSet64;
         long managedHeapBytes = GC.GetTotalMemory(false);
         int[] gcCounts = Enumerable.Range(0, 3).Select(i => GC.CollectionCount(i) - startGcCounts[i]).ToArray();
-        FrameSample[] recorded = frames.AsSpan(0, count).ToArray();
-        long finishUtcTicks = DateTime.UtcNow.Ticks;
-        var pauses = gcListener?.Pauses.Where(p => p.EndUtcTicks >= baseUtcTicks &&
-                                                   p.StartUtcTicks <= finishUtcTicks).ToArray() ?? [];
+        return new ReplayResourceSnapshot(cpuTicks, allocated, gcPauseTicks, residentBytes, peakResidentBytes,
+            managedHeapBytes, gcCounts);
+    }
+
+    private void MarkGcOverlaps(FrameSample[] recorded, GcPause[] pauses)
+    {
         if (pauses.Length > 0)
+        {
             for (int i = warmupFrames; i < recorded.Length; i++)
             {
-                long start = baseUtcTicks + (recorded[i].ReceiveTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond /
-                    Stopwatch.Frequency;
-                long end = baseUtcTicks + (recorded[i].ProcessingEndTicks - baseStopwatchTicks) *
-                    TimeSpan.TicksPerSecond / Stopwatch.Frequency;
+                long start = baseUtcTicks +
+                    (recorded[i].ReceiveTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond / Stopwatch.Frequency;
+                long end = baseUtcTicks +
+                    (recorded[i].ProcessingEndTicks - baseStopwatchTicks) * TimeSpan.TicksPerSecond / Stopwatch.Frequency;
                 recorded[i].GcPauseOverlap = pauses.Any(p => p.StartUtcTicks <= end && p.EndUtcTicks >= start);
             }
+        }
+    }
 
+    private ReplaySampleSummary SummarizeSamples(FrameSample[] recorded)
+    {
         int measuredCount = Math.Max(0, count - warmupFrames);
         var processing = new long[measuredCount];
         var receiveToDecision = new long[measuredCount];
@@ -122,42 +223,28 @@ public sealed class ReplayBenchmarkRecorder : IDisposable
         for (int i = warmupFrames; i < count; i++)
         {
             FrameSample f = recorded[i];
-            processing[i - warmupFrames] =
-                NanosecondTime.FromTicks(f.ProcessingEndTicks - f.ReceiveTicks, Stopwatch.Frequency);
+            processing[i - warmupFrames] = NanosecondTime.FromTicks(f.ProcessingEndTicks - f.ReceiveTicks,
+                Stopwatch.Frequency);
             if (f.LastDecisionTicks != 0)
-                receiveToDecision[withDecision++] =
-                    NanosecondTime.FromTicks(f.LastDecisionTicks - f.ReceiveTicks, Stopwatch.Frequency);
+            {
+                receiveToDecision[withDecision++] = NanosecondTime.FromTicks(f.LastDecisionTicks - f.ReceiveTicks,
+                    Stopwatch.Frequency);
+            }
+
             measuredDecisions += f.Decisions;
             measuredBytes += f.Bytes;
         }
 
-        long durationNs = measuredCount == 0
-            ? 0
-            : NanosecondTime.FromTicks(
-                recorded[^1].ProcessingEndTicks - recorded[warmupFrames].ReceiveTicks, Stopwatch.Frequency);
+        return new ReplaySampleSummary(measuredCount, processing, receiveToDecision, withDecision,
+            measuredDecisions, measuredBytes);
+    }
 
-        LatencySummary Stage(Func<FrameSample, long> select)
-        {
-            long[] values = recorded.AsSpan(Math.Min(warmupFrames, recorded.Length)).ToArray()
-                .Select(select).Where(v => v > 0)
-                .Select(v => NanosecondTime.FromTicks(v, Stopwatch.Frequency)).ToArray();
-            return LatencySummary.From(values, values.Length);
-        }
-
-        long[] pauseDurations = pauses.Select(p => Math.Max(0, p.EndUtcTicks - p.StartUtcTicks) * 100).ToArray();
-        return new BenchmarkAppReport(3, completed, Stopwatch.Frequency, warmupFrames, count,
-            totalDecisions, decisionHash.ToString("x16"), measuredCount, measuredDecisions, measuredBytes,
-            durationNs, LatencySummary.From(processing, processing.Length),
-            LatencySummary.From(receiveToDecision, withDecision),
-            Stage(f => f.DecodeTicks), Stage(f => f.BookTicks),
-            Stage(f => f.SignalTicks), Stage(f => f.QuoteTicks),
-            cpuTicks * 100L, durationNs == 0 ? 0 : cpuTicks * 100.0 / durationNs,
-            measuredCount == 0 ? 0 : cpuTicks * 100.0 / measuredCount,
-            residentBytes, peakResidentBytes, managedHeapBytes,
-            allocated, measuredCount == 0 ? 0 : (double)allocated / measuredCount,
-            gcCounts, gcPauseTicks * 100L, LatencySummary.From(pauseDurations, pauseDurations.Length),
-            gcListener is not null,
-            pauses, recorded) { MemorySnapshotPhase = "after_replay_before_report" };
+    private LatencySummary SummarizeStage(FrameSample[] recorded, Func<FrameSample, long> select)
+    {
+        long[] values = recorded.AsSpan(Math.Min(warmupFrames,
+            recorded.Length)).ToArray().Select(select).Where(v => v > 0).Select(v => NanosecondTime.FromTicks(v,
+            Stopwatch.Frequency)).ToArray();
+        return LatencySummary.From(values, values.Length);
     }
 
     public void Dispose()

@@ -1,71 +1,24 @@
-# AssumptionZero.CSharp
+# AssumptionZero — C#
 
-AssumptionZero explores a market-maker architecture built around a clear processing
-flow for each exchange instrument. An instrument's configuration, order book,
-signals, inventory, and quote decisions stay together, making the path from an
-incoming update to a decision easier to follow.
+A market-processing application that decodes Binance SBE messages, maintains
+instrument books and signals, and produces quote intents. Replay and live modes
+produce intents; the local simulated exchange also exercises order submission,
+acknowledgements, fills, and cancellations.
 
-The second aim is to compare **C# and [Rust](https://github.com/georgi2005atanasov/assumption_zero)
-on the same hot path**: identical market messages, strategy rules, and starting
-state, with correctness checked before
-interpreting latency, CPU, allocation, or memory results. This is a working
-processing prototype; its local simulation mode now submits controlled orders,
-while normal replay and live processing produce quote intents.
+This repository contains the C# application, the shared simulator, and integration
+tests. The [Rust implementation](https://github.com/georgi2005atanasov/assumption_zero)
+uses the same simulator and fixture format.
 
-C# is already optimized around bounded arrays, reusable buffers, and a single
-market processing loop, with tests for zero managed allocations in warmed core
-processing. A smaller Rust process footprint is useful when it addresses a real
-resource constraint; it is not, by itself, a reason to replace the C# application.
+## Get the source
 
-## Architecture
-
-The transport identifies the instrument and routes each decoded update to its
-`InstrumentRuntime`. That runtime owns the state needed to process the update:
-
-```mermaid
-flowchart LR
-    Feed[Market WebSocket] --> Decode[SBE validation and decoding]
-    Decode --> Route[Route by symbol]
-    Route --> BTC[BTC runtime: config, book, signals, inventory]
-    Route --> ETH[ETH runtime: config, book, signals, inventory]
-    BTC --> Quotes[Price, risk checks, quote intents]
-    ETH --> Quotes
-    Account[Account WebSocket] --> Queue[SPSC account-event ring buffer]
-    Queue --> Writer[Market processing loop drains account events]
-    Writer --> Ledger[Shared account balances and reservations]
-    Ledger --> BTC
-    Ledger --> ETH
+```bash
+git clone https://github.com/georgi2005atanasov/AssumptionZero.CSharp.git
+cd AssumptionZero.CSharp
 ```
 
-Each runtime follows **book update → signals → pricing and risk → quote intent**.
-`HotConfig` is a value type held by each runtime; startup currently supplies the
-same defaults to all instruments. The separation is of state and processing flow:
-the current implementation uses one market processing loop, rather than a worker
-thread per instrument.
-
-- **Arrays and reusable buffers** hold book levels, rolling signal history, decode
-  scratch space, and runtime lookup data. Bounded storage keeps memory use explicit
-  and reduces allocations on the hot path.
-- **A single-producer/single-consumer ring buffer** passes account events from the
-  account WebSocket receiver to the market processing loop. That loop drains the
-  events before processing a market message, so both account and market updates
-  are applied on the same processing path. Queue overflow invalidates account state.
-- **Shared account risk** remains in `AccountRiskLedger`: instruments trading the
-  same asset must see the same available balance and reservations.
-- **Startup and I/O** sit outside the decision calculations. REST snapshots and
-  signing initialize live state; capture mode uses a separate channel and database
-  writer. The SPSC ring buffer is specifically for live account events.
-
-Useful entry points:
-
-| Area | Code |
-| --- | --- |
-| Mode selection and startup | [Program.cs](AssumptionZero.App/Program.cs), [ExecutionRouter.cs](AssumptionZero.App/ExecutionRouter.cs) |
-| Per-instrument processing | [InstrumentRuntime.cs](AssumptionZero.Application/Services/InstrumentRuntime.cs) |
-| Configuration and strategy | [HotConfig.cs](AssumptionZero.Domain/InMemory/HotConfig.cs), [MarketMakingStrategy.cs](AssumptionZero.Domain/InMemory/MarketMakingStrategy.cs) |
-| Market decoding and routing | [BinanceFeedReader.cs](AssumptionZero.Infrastructure/External/BinanceFeedReader.cs) |
-| Account events and handoff | [BinanceAccountStream.cs](AssumptionZero.Infrastructure/External/BinanceAccountStream.cs), [SpscRingBuffer.cs](AssumptionZero.Infrastructure/SpscRingBuffer.cs) |
-| Shared balances and reservations | [AccountRiskLedger.cs](AssumptionZero.Application/Services/AccountRiskLedger.cs) |
+Choose Docker for a self-contained demo and C# tests, or install the .NET 10 SDK
+and OpenSSL for native development. Downloads require network access; the demo
+and regular tests use local fixtures and need no Binance credentials or database.
 
 ## Start the demo with Docker
 
@@ -95,10 +48,6 @@ Run the same command again to repeat it. Remove the stopped containers with:
 docker compose down
 ```
 
-The demo proves the flow runs end to end. Its 120 messages are too few for a
-throughput or latency-capacity claim. Use native Release builds and the
-[controlled comparison runbook](docs/testing.md) for performance measurements.
-
 ## Run the tests
 
 Using Docker:
@@ -125,16 +74,19 @@ named volume persists across restarts.
 
 ## Run without Docker
 
-Use the .NET 10 SDK and OpenSSL on `PATH`. Commands below use Bash from the repository
-root. Linux is the reference environment for benchmarks.
+Use the .NET 10 SDK and OpenSSL on `PATH`. Commands below use Bash on Linux from
+the repository root.
 
 ```bash
+export DOTNET_HOST_PATH="$(command -v dotnet)"
 dotnet build AssumptionZero.sln -c Release
 dotnet test AssumptionZero.Tests/AssumptionZero.Tests.csproj -c Release --no-build
 ```
 
 Build the entire solution first: some tests launch the Release application
-executable. If the SDK is installed in `$HOME/.dotnet`, add that directory to `PATH`.
+executable. If the SDK is installed in `$HOME/.dotnet`, add that directory to `PATH`
+before running these commands. Check `dotnet --list-sdks` for a 10.x SDK.
+`DOTNET_HOST_PATH` tells tests and launchers which .NET executable to use.
 
 In terminal 1:
 
@@ -182,7 +134,7 @@ Binance connectivity or account permissions; check those with the live run.
 To capture data, you can start the optional local database:
 
 ```bash
-docker compose up -d database
+docker compose up -d --wait database
 export PG_CONNECTION='Host=localhost;Port=5433;Database=assumption_zero;Username=postgres;Password=local_test_password'
 EXECUTION_MODE=SeedData \
   dotnet AssumptionZero.App/bin/Release/net10.0/AssumptionZero.App.dll
@@ -200,103 +152,71 @@ See [recording and replay details](docs/replay.md) for listing recordings, repla
 from sequence one, fixture selection, timing, and optional PostgreSQL integration
 tests. Set `PG_TEST_CONNECTION` separately to enable database tests outside Docker.
 
-## Comparing C# and Rust
+## Run cross-language tests
 
-Both applications use the C# simulator. See [the comparison runbook](docs/testing.md)
-for build scripts, paired runs, CPU affinity, and report interpretation, and
-[the report schema](docs/benchmark-schema.md) for field definitions.
-
-Both applications default to the same **100 symbols in the same order**, defined
-in C#'s `AssumptionZero.App/Program.cs` and Rust's `src/symbols.json`. Keep the lists
-and their order aligned when changing the workload for fixture-free comparisons.
-With a shared fixture, both applications use its instruments; the bundled BTC
-fixture is for the demo only.
-
-Replay without a fixture estimates balances, instrument rules, and starting books.
-It exercises processing performance but cannot reconstruct historical strategy
-results. Correctness hashes must agree before comparing performance. Repository
-paths, database addresses, recording IDs, and CPU IDs in the runbook are examples
-from the development machine and need to match your setup.
-
-To enable the Rust integration tests after building its Release executable:
+Install Rust through rustup, then build the Rust application. Set `RUST_ROOT` to
+an absolute checkout path of your choice; commands here run from the C# root.
 
 ```bash
-export RUST_APP_TEST='/absolute/path/to/assumption-zero/target/release/assumption-zero'
+export RUST_ROOT="$HOME/projects/assumption_zero"
+git clone https://github.com/georgi2005atanasov/assumption_zero.git "$RUST_ROOT"
+(cd "$RUST_ROOT" && cargo +stable build --release --locked)
+(cd "$RUST_ROOT" && cargo +stable test --release --locked)
+export RUST_APP_TEST="$RUST_ROOT/target/release/assumption-zero"
+export DOTNET_HOST_PATH="$(command -v dotnet)"
+dotnet build AssumptionZero.sln -c Release
 dotnet test AssumptionZero.Tests/AssumptionZero.Tests.csproj -c Release --no-build
 ```
 
-## Controlled exchange benchmark
+Skip the clone if the repository already exists. Rust's own tests run independently
+of C#. Setting `RUST_APP_TEST` enables the C# suite's Rust interoperability checks,
+including replay, live-adapter fixtures, and simulated order handling.
 
-The new `SimulatedExchange` mode sends orders to a local C# exchange and receives
-acknowledgements, rejections, partial/full fills, and cancellations. Both clients
-update inventory and the shared risk ledger before subsequent decisions. The
-normal replay and live modes retain their existing intent-only behavior.
-
-The default comparison now offers **500,000 messages over 600 seconds per run**,
-with 50,000 warmup messages, repeated deterministic equivalence checks, a baseline
-pair, and five alternating measured pairs. This is about two hours plus preflight.
-It uses recorded market data and controlled synthetic execution, with no Binance
-calls. Async order counts can differ, so matching frames alone is not evidence of
-an equal workload or a rewrite decision.
+To include both database integration tests, start the database described above,
+then rerun the suite with both `RUST_APP_TEST` and `PG_TEST_CONNECTION` set:
 
 ```bash
-/home/sparrow/RiderProjects/AssumptionZero/scripts/run-closed-loop-benchmark.sh prepare
-# Close other applications before the measurement run.
-/home/sparrow/RiderProjects/AssumptionZero/scripts/run-closed-loop-benchmark.sh run \
-  --max-messages 500000 --target-duration-seconds 600 \
-  --app-cpus 2 --simulator-cpus 0,4,6,8,10,12,14
+export PG_TEST_CONNECTION='Host=localhost;Port=5433;Database=assumption_zero;Username=postgres;Password=local_test_password'
+dotnet test AssumptionZero.Tests/AssumptionZero.Tests.csproj -c Release --no-build
 ```
 
-The CPU IDs above match the development machine. Preparation fingerprints the
-build; the run writes reconciled results and an archive to return for analysis.
-See [the closed-loop runbook](docs/closed-loop-benchmark.md) for protocol, measurement boundaries, readiness limits, and options.
-The published October 2 figures below still describe the earlier market-only
-benchmark; they are not results of this new order-cycle test.
+Use a test database whose account can create and drop schemas. The tests create
+and remove their own schemas. `PG_CONNECTION` configures applications and the
+simulator; `PG_TEST_CONNECTION` separately enables database tests. Missing optional
+configuration produces skipped tests, so inspect the test summary.
 
-## What the recorded comparison shows
+## Run the local order-cycle demo
 
-The accepted session on **2 October 2026 at 19:39 UTC** used the same 300,000
-recorded messages, five measured runs per language in alternating order, and the
-same application CPU. Each replay was paced to 60 seconds; the first 30,000
-messages were excluded as warm-up. Both applications completed all runs and
-matched the checked decision and final-state hashes. Values below are medians
-of five per-run measurements.
+After building both projects above, this command starts the exchange and clients,
+checks deterministic results, and exercises asynchronous settlement without a
+database or Binance credentials:
 
-| Measurement | C# | Rust |
-| --- | ---: | ---: |
-| Process CPU time over about 54.35 measured seconds | 26.44 s | 5.28 s |
-| Resident memory after replay, before reporting | 121.16 MiB | 59.32 MiB |
-| Frame-processing P99 | 20.335 µs | 20.350 µs |
-| Send-to-decision P99 | 367.368 µs | 340.990 µs |
+```bash
+dotnet AssumptionZero.Simulator/bin/Release/net10.0/AssumptionZero.Simulator.dll closed-loop \
+  --recording demo --max-messages 120 --target-duration-seconds 1 \
+  --repetitions 1 --scenario mixed --language both --rust-root "$RUST_ROOT"
+```
 
-Rust used **80% less process CPU and 51% less resident memory in this session**.
-In absolute terms, that is about **0.39 of one CPU core on average and 62 MiB of
-RAM** at the tested load. Frame-processing P99 was essentially tied; C# had lower
-book-update, signal, and quote-stage P99 values. Rust's lower median
-send-to-decision P99 had overlapping run ranges with C#, so it does not establish
-a consistent latency advantage.
+The runner prints the results directory and reconciliation status, then exits.
+Use `--scenario rest` to exercise resting orders. `--language CSharp` runs only the
+C# client, but the runner still needs the Rust checkout for `src/symbols.json`.
+Keep `DOTNET_HOST_PATH` set as above.
 
-C# is an optimized implementation, and its larger measured process footprint
-does not make it a worse choice. Process CPU includes transport, runtime, and
-instrumentation work outside the trading calculations. The cause of the CPU gap
-has not been established, and there were no measured C# GC collections or pauses.
-Memory includes runtime state and benchmark buffers. The older 77% memory-saving
-claim was withdrawn because sampling phases differed; the 51% figure uses the
-corrected measurement boundary.
+## Project layout
 
-These results describe the saved builds and configuration. Both benchmark
-applications had 100 configured instruments, matching the current default lists,
-with only 5 ready at the end. The workload used synthetic starting state. Maximum
-throughput, instrumentation CPU overhead, and production resource savings remain
-unestablished.
+| Project | Responsibility |
+| --- | --- |
+| `AssumptionZero.App` | Startup, mode selection, replay and session orchestration |
+| `AssumptionZero.Application` | Service contracts, instrument runtime, account risk and reservations |
+| `AssumptionZero.Domain` | Books, signals, configuration, and strategy calculations |
+| `AssumptionZero.Infrastructure` | Exchange adapters, decoding, persistence, and reporting |
+| `AssumptionZero.Simulator` | Demo and recorded playback, controlled local exchange |
+| `AssumptionZero.Tests` | Unit and integration tests |
 
-The Rust result is promising, but this benchmark alone does not justify a rewrite.
-If the C# application meets its latency and resource budgets, retaining it is a
-reasonable choice. Profile the CPU difference and test representative workloads
-before deciding whether the smaller footprint is worth migration and maintenance
-costs.
+## Further documentation
 
-Evidence: `docs/benchmark-accepted-2026-10-02.md` and
-`benchmark-results/20261002T193939Z-simulator-compare-9g2o0V/`. The paired JSON,
-per-run summaries, and sample CSVs are the source of these figures. Follow
-[the comparison runbook](docs/testing.md) for a new controlled comparison.
+- [Recording and replay](docs/replay.md)
+- [Benchmark setup and execution](docs/testing.md)
+- [Controlled exchange runbook](docs/closed-loop-benchmark.md)
+- [Benchmark report fields](docs/benchmark-schema.md)
+- [Recorded comparison report](docs/benchmark-accepted-2026-10-02.md)

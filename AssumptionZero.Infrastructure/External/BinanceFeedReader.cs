@@ -1,3 +1,4 @@
+using AssumptionZero.Application.Interfaces.External;
 using System.Diagnostics;
 using System.Buffers.Binary;
 using System.Net.WebSockets;
@@ -12,32 +13,7 @@ using Spot_stream;
 
 namespace AssumptionZero.Infrastructure.External;
 
-public enum FeedMode
-{
-    /// <summary>Record live market frames without calculating decisions.</summary>
-    Capture,
-    /// <summary>Calculate decisions from live market frames.</summary>
-    Live,
-    /// <summary>Replay with an already synchronized book supplied by the caller.</summary>
-    ReplayWithSnapshot,
-    /// <summary>Replay with a starting book estimated from the first market frames.</summary>
-    ReplayWithEstimatedBook
-}
-
-public readonly record struct BestQuote(
-    string Symbol,
-    decimal BidPrice,
-    decimal BidQuantity,
-    decimal AskPrice,
-    decimal AskQuantity,
-    long UpdateId,
-    long EventTimeMicros);
-
-public readonly record struct DepthLevel(
-    decimal Price,
-    decimal Quantity);
-
-public sealed class BinanceFeedReader
+public sealed class BinanceFeedReader : IDataFeedReader
 {
     private readonly string[] symbols;
     private readonly string apiKey;
@@ -45,17 +21,21 @@ public sealed class BinanceFeedReader
     private readonly FeedMode mode;
     private bool IsReplay => mode is FeedMode.ReplayWithSnapshot or FeedMode.ReplayWithEstimatedBook;
     private bool EstimatesBook => mode == FeedMode.ReplayWithEstimatedBook;
+
     private readonly bool logEvents;
 
     private readonly MessageHeader header = new();
+
     private readonly DepthDiffStreamEvent depthDecoder = new();
+
     private readonly BestBidAskStreamEvent quoteDecoder = new();
+
     private readonly TradesStreamEvent tradesDecoder = new();
     private readonly byte[] receiveBuffer = new byte[1024 * 1024];
     private readonly DirectBuffer directBuffer;
     private readonly InstrumentRuntime[] runtimes;
     private readonly byte[][] runtimeSymbols;
-    private readonly BinanceAccountStream? accountStream;
+    private readonly IAccountStream? accountStream;
     private readonly DepthLevel[] bidChanges = new DepthLevel[5_000];
     private readonly DepthLevel[] askChanges = new DepthLevel[5_000];
     private readonly decimal[] tradeQuantities = new decimal[8_192];
@@ -77,10 +57,16 @@ public sealed class BinanceFeedReader
     public event Action<InstrumentRuntime, QuoteDecision>? DecisionProduced;
     public ReplayBenchmarkRecorder? Benchmark { get; set; }
 
-    /// <summary>Runs the same decoder used by the WebSocket receive loop; useful for deterministic replay checks.</summary>
+    /// <summary>
+    /// Runs the same decoder used by the WebSocket receive loop; useful for deterministic replay checks.
+    /// </summary>
     public void ProcessBinaryFrame(ReadOnlySpan<byte> frame)
     {
-        if (frame.Length > receiveBuffer.Length) throw new ArgumentOutOfRangeException(nameof(frame));
+        if (frame.Length > receiveBuffer.Length)
+        {
+            throw new ArgumentOutOfRangeException(nameof(frame));
+        }
+
         frame.CopyTo(receiveBuffer);
         accountStream?.Drain();
         DecodeSbeMessage(frame.Length);
@@ -93,21 +79,30 @@ public sealed class BinanceFeedReader
         FeedMode mode,
         bool? logEvents = null,
         InstrumentRuntime[]? runtimes = null,
-        BinanceAccountStream? accountStream = null
-    )
+        IAccountStream? accountStream = null)
     {
-        if (mode is FeedMode.Capture or FeedMode.Live) ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        if (mode is FeedMode.Capture or FeedMode.Live)
+        {
+            ArgumentException.ThrowIfNullOrWhiteSpace(apiKey);
+        }
+
         this.apiKey = apiKey;
         this.symbols = symbols;
         this.mode = mode;
         this.logEvents = logEvents ?? !IsReplay;
         this.runtimes = runtimes ?? [];
         if (this.runtimes.Any(runtime => runtime.EstimatesBookFromFeed != EstimatesBook))
+        {
             throw new ArgumentException("Feed mode and instrument book initialization must match.", nameof(runtimes));
+        }
+
         this.accountStream = accountStream;
         runtimeSymbols = new byte[this.runtimes.Length][];
         for (int i = 0; i < runtimeSymbols.Length; i++)
+        {
             runtimeSymbols[i] = Encoding.UTF8.GetBytes(this.runtimes[i].Instrument.Symbol);
+        }
+
         directBuffer = new DirectBuffer(receiveBuffer);
         string streams = FormatStreams(symbols);
         uri = new Uri(IsReplay ? baseUrl : $"{baseUrl}{streams}");
@@ -119,9 +114,11 @@ public sealed class BinanceFeedReader
         Func<CancellationToken, Task>? afterConnect = null)
     {
         if (Benchmark is not null && !IsReplay)
+        {
             throw new ArgumentException("Benchmark recording requires replay mode.");
-        Task? writerTask = null;
+        }
 
+        Task? writerTask = null;
         if (mode == FeedMode.Capture)
         {
             // Starts the background database writer.
@@ -131,15 +128,13 @@ public sealed class BinanceFeedReader
         try
         {
             using var ws = PrepareClient();
+            var connectedClient = await ws.ThenConnect(symbols ?? [], uri, cancellationToken);
+            if (afterConnect is not null)
+            {
+                await afterConnect(cancellationToken);
+            }
 
-            var connectedClient = await ws.ThenConnect(
-                symbols ?? [],
-                uri,
-                cancellationToken);
-            if (afterConnect is not null) await afterConnect(cancellationToken);
-            if (Benchmark is not null)
-                foreach (InstrumentRuntime runtime in runtimes)
-                    runtime.BenchmarkStages = true;
+            EnableBenchmarkStages();
             recordingStartTimestamp = Stopwatch.GetTimestamp();
             await connectedClient.AndStartReceiving(
                 ProcessingPipeline,
@@ -147,13 +142,7 @@ public sealed class BinanceFeedReader
                 cancellationToken,
                 allowNormalClosure: IsReplay,
                 logEvents: logEvents,
-                nonBinaryFrame: Benchmark is null
-                    ? null
-                    : message =>
-                    {
-                        Benchmark.BeginFrame(message.Type, message.Length, message.ReceivedTimestamp);
-                        Benchmark.EndFrame();
-                    });
+                nonBinaryFrame: Benchmark is null ? null : RecordNonBinaryFrame);
         }
         finally
         {
@@ -165,6 +154,25 @@ public sealed class BinanceFeedReader
         }
     }
 
+    private void EnableBenchmarkStages()
+    {
+        if (Benchmark is null)
+        {
+            return;
+        }
+
+        foreach (InstrumentRuntime runtime in runtimes)
+        {
+            runtime.BenchmarkStages = true;
+        }
+    }
+
+    private void RecordNonBinaryFrame(WsMessage message)
+    {
+        Benchmark!.BeginFrame(message.Type, message.Length, message.ReceivedTimestamp);
+        Benchmark.EndFrame();
+    }
+
     private void ProcessingPipeline(WsMessage message)
     {
         Benchmark?.BeginFrame(message.Type, message.Length, message.ReceivedTimestamp);
@@ -172,21 +180,24 @@ public sealed class BinanceFeedReader
         {
             accountStream?.Drain();
             if (accountStream?.Faulted == true)
+            {
                 throw new IOException("User-data stream lost account reconciliation.");
+            }
+
             if (mode == FeedMode.Capture)
             {
                 long now = Stopwatch.GetTimestamp();
-
                 var recorded = new RecordedMessage(
                     recordingId,
                     ++recordingSequence,
                     NanosecondTime.FromTicks(now - recordingStartTimestamp, Stopwatch.Frequency),
                     (short)message.Type,
                     message.Payload.AsSpan(0, message.Length).ToArray());
-
                 if (!recordedMessages.Writer.TryWrite(recorded))
+                {
                     throw new InvalidOperationException(
                         "Recording queue is full. Stop the capture to avoid losing messages.");
+                }
 
                 return;
             }
@@ -203,33 +214,23 @@ public sealed class BinanceFeedReader
     {
         var ws = new ClientWebSocket();
         if (!IsReplay)
-            ws.Options.SetRequestHeader(
-                BinanceConstants.BinanceApiKeyHeaderName,
-                apiKey
-            );
+        {
+            ws.Options.SetRequestHeader(BinanceConstants.BinanceApiKeyHeaderName, apiKey);
+        }
+
         ws.Options.KeepAliveInterval = TimeSpan.Zero;
         return ws;
     }
 
     private void DecodeSbeMessage(int length)
     {
-        if (length < MessageHeader.Size)
+        if (!ValidateMessage(length))
         {
-            if (!IsReplay) throw new IOException($"Invalid SBE message of {length} bytes.");
-            return;
-        }
-
-        if (!ValidFrame(receiveBuffer.AsSpan(0, length)))
-        {
-            if (!IsReplay) throw new IOException("Invalid SBE frame; reconnect and reload snapshots.");
             return;
         }
 
         DirectBuffer buffer = directBuffer;
-        header.Wrap(
-            buffer,
-            0,
-            MessageHeader.SbeSchemaVersion);
+        header.Wrap(buffer, 0, MessageHeader.SbeSchemaVersion);
         Benchmark?.SetTemplate(header.TemplateId);
         if (header.TemplateId == BestBidAskStreamEvent.TemplateId)
         {
@@ -249,56 +250,114 @@ public sealed class BinanceFeedReader
             return;
         }
 
-        if (!IsReplay) throw new IOException($"Unknown SBE template {header.TemplateId}.");
+        if (!IsReplay)
+        {
+            throw new IOException($"Unknown SBE template {header.TemplateId}.");
+        }
+    }
+
+    private bool ValidateMessage(int length)
+    {
+        if (length < MessageHeader.Size)
+        {
+            if (!IsReplay)
+            {
+                throw new IOException($"Invalid SBE message of {length} bytes.");
+            }
+
+            return false;
+        }
+
+        if (!ValidFrame(receiveBuffer.AsSpan(0, length)))
+        {
+            if (!IsReplay)
+            {
+                throw new IOException("Invalid SBE frame; reconnect and reload snapshots.");
+            }
+
+            return false;
+        }
+
+        return true;
     }
 
     private void DecodeBestBidAsk(DirectBuffer buffer)
     {
         long decodeStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
-        if (QuoteReceived is null && !logEvents && !EstimatesBook) return;
-        quoteDecoder.WrapForDecode(
-            buffer,
-            MessageHeader.Size,
-            header.BlockLength,
-            header.Version);
+        if (QuoteReceived is null && !logEvents && !EstimatesBook)
+        {
+            return;
+        }
+
+        quoteDecoder.WrapForDecode(buffer, MessageHeader.Size, header.BlockLength, header.Version);
         sbyte priceExponent = quoteDecoder.PriceExponent;
         sbyte qtyExponent = quoteDecoder.QtyExponent;
-        decimal bidPrice = DecodeDecimal(
-            quoteDecoder.BidPrice,
-            priceExponent);
-        decimal bidQuantity = DecodeDecimal(
-            quoteDecoder.BidQty,
-            qtyExponent);
-        decimal askPrice = DecodeDecimal(
-            quoteDecoder.AskPrice,
-            priceExponent);
-        decimal askQuantity = DecodeDecimal(
-            quoteDecoder.AskQty,
-            qtyExponent);
-        if (quoteDecoder.SymbolLength() > 64) return;
+        decimal bidPrice = DecodeDecimal(quoteDecoder.BidPrice, priceExponent);
+        decimal bidQuantity = DecodeDecimal(quoteDecoder.BidQty, qtyExponent);
+        decimal askPrice = DecodeDecimal(quoteDecoder.AskPrice, priceExponent);
+        decimal askQuantity = DecodeDecimal(quoteDecoder.AskQty, qtyExponent);
+        if (quoteDecoder.SymbolLength() > 64)
+        {
+            return;
+        }
+
         Span<byte> symbolBytes = stackalloc byte[64];
         int symbolLength = quoteDecoder.GetSymbol(symbolBytes);
         if (EstimatesBook)
         {
-            InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
-            if (runtime is not null && !runtime.OrderBook.IsSynchronized)
-            {
-                runtime.SetEstimatedBookPrecision(priceExponent, qtyExponent);
-                Instrument instrument = runtime.Instrument;
-                long bidTicks = instrument.ToPriceTicks(bidPrice);
-                long askTicks = instrument.ToPriceTicks(askPrice);
-                long bidUnits = instrument.ToQuantityUnits(bidQuantity);
-                long askUnits = instrument.ToQuantityUnits(askQuantity);
-                if (instrument.Price(bidTicks) == bidPrice && instrument.Price(askTicks) == askPrice &&
-                    instrument.Quantity(bidUnits) == bidQuantity && instrument.Quantity(askUnits) == askQuantity)
-                    runtime.SeedEstimatedBook(bidTicks, bidUnits, askTicks, askUnits,
-                        quoteDecoder.BookUpdateId);
-            }
+            SeedBookFromQuote(
+                symbolBytes[..symbolLength],
+                priceExponent,
+                qtyExponent,
+                bidPrice,
+                bidQuantity,
+                askPrice,
+                askQuantity);
         }
 
         Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
-        if (QuoteReceived is null && !logEvents) return;
-        string symbol = Encoding.UTF8.GetString(symbolBytes[..symbolLength]);
+        if (QuoteReceived is null && !logEvents)
+        {
+            return;
+        }
+
+        PublishQuote(symbolBytes[..symbolLength], bidPrice, bidQuantity, askPrice, askQuantity);
+    }
+
+    private void SeedBookFromQuote(
+        ReadOnlySpan<byte> symbolBytes,
+        sbyte priceExponent,
+        sbyte qtyExponent,
+        decimal bidPrice,
+        decimal bidQuantity,
+        decimal askPrice,
+        decimal askQuantity)
+    {
+        InstrumentRuntime? runtime = FindRuntime(symbolBytes);
+        if (runtime is not null && !runtime.OrderBook.IsSynchronized)
+        {
+            runtime.SetEstimatedBookPrecision(priceExponent, qtyExponent);
+            Instrument instrument = runtime.Instrument;
+            long bidTicks = instrument.ToPriceTicks(bidPrice);
+            long askTicks = instrument.ToPriceTicks(askPrice);
+            long bidUnits = instrument.ToQuantityUnits(bidQuantity);
+            long askUnits = instrument.ToQuantityUnits(askQuantity);
+            if (instrument.Price(bidTicks) == bidPrice && instrument.Price(askTicks) == askPrice &&
+                instrument.Quantity(bidUnits) == bidQuantity && instrument.Quantity(askUnits) == askQuantity)
+            {
+                runtime.SeedEstimatedBook(bidTicks, bidUnits, askTicks, askUnits, quoteDecoder.BookUpdateId);
+            }
+        }
+    }
+
+    private void PublishQuote(
+        ReadOnlySpan<byte> symbolBytes,
+        decimal bidPrice,
+        decimal bidQuantity,
+        decimal askPrice,
+        decimal askQuantity)
+    {
+        string symbol = Encoding.UTF8.GetString(symbolBytes);
         var quote = new BestQuote(
             symbol,
             bidPrice,
@@ -309,47 +368,73 @@ public sealed class BinanceFeedReader
             quoteDecoder.EventTime);
         QuoteReceived?.Invoke(quote);
         if (logEvents)
+        {
             Console.WriteLine(
                 $"QUOTE {symbol} bid={bidPrice} ({bidQuantity}) ask={askPrice} ({askQuantity}) update={quote.UpdateId}");
+        }
     }
 
     private void DecodeDepthDiff(DirectBuffer buffer)
     {
         long decodeStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
-        depthDecoder.WrapForDecode(
-            buffer,
-            MessageHeader.Size,
-            header.BlockLength,
-            header.Version);
+        depthDecoder.WrapForDecode(buffer, MessageHeader.Size, header.BlockLength, header.Version);
         sbyte priceExponent = depthDecoder.PriceExponent;
         sbyte qtyExponent = depthDecoder.QtyExponent;
-        int bidCount = 0, askCount = 0;
-        var bids = depthDecoder.Bids;
-        while (bids.HasNext)
+        if (!ReadDepthChanges(priceExponent, qtyExponent, out int bidCount, out int askCount))
         {
-            var bid = bids.Next();
-            if (bidCount == bidChanges.Length) return;
-            bidChanges[bidCount++] = new DepthLevel(
-                DecodeDecimal(bid.Price, priceExponent),
-                DecodeDecimal(bid.Qty, qtyExponent));
+            return;
         }
 
-        var asks = depthDecoder.Asks;
-
-        while (asks.HasNext)
+        if (depthDecoder.SymbolLength() > 64)
         {
-            var ask = asks.Next();
-            if (askCount == askChanges.Length) return;
-            askChanges[askCount++] = new DepthLevel(
-                DecodeDecimal(ask.Price, priceExponent),
-                DecodeDecimal(ask.Qty, qtyExponent));
+            return;
         }
 
-        if (depthDecoder.SymbolLength() > 64) return;
         Span<byte> symbolBytes = stackalloc byte[64];
         int symbolLength = depthDecoder.GetSymbol(symbolBytes);
         InstrumentRuntime? runtime = FindRuntime(symbolBytes[..symbolLength]);
         Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
+        SeedBookFromDepth(runtime, priceExponent, qtyExponent, bidCount, askCount);
+        ApplyDepthUpdate(runtime, bidCount, askCount);
+        LogDepthChanges(symbolBytes[..symbolLength], bidCount, askCount);
+    }
+
+    private bool ReadDepthChanges(sbyte priceExponent, sbyte qtyExponent, out int bidCount, out int askCount)
+    {
+        bidCount = 0;
+        askCount = 0;
+        var bids = depthDecoder.Bids;
+        while (bids.HasNext)
+        {
+            var bid = bids.Next();
+            if (bidCount == bidChanges.Length)
+            {
+                return false;
+            }
+
+            bidChanges[bidCount++] = new DepthLevel(DecodeDecimal(bid.Price, priceExponent), DecodeDecimal(bid.Qty,
+                qtyExponent));
+        }
+
+        var asks = depthDecoder.Asks;
+        while (asks.HasNext)
+        {
+            var ask = asks.Next();
+            if (askCount == askChanges.Length)
+            {
+                return false;
+            }
+
+            askChanges[askCount++] = new DepthLevel(DecodeDecimal(ask.Price, priceExponent), DecodeDecimal(ask.Qty,
+                qtyExponent));
+        }
+
+        return true;
+    }
+
+    private void SeedBookFromDepth(InstrumentRuntime? runtime, sbyte priceExponent, sbyte qtyExponent, int bidCount,
+        int askCount)
+    {
         if (EstimatesBook && runtime is not null && !runtime.OrderBook.IsSynchronized)
         {
             runtime.SetEstimatedBookPrecision(priceExponent, qtyExponent);
@@ -357,86 +442,124 @@ public sealed class BinanceFeedReader
             {
                 DepthLevel level = bidChanges[i];
                 if (level.Price > 0 && level.Quantity > 0)
-                    runtime.ObserveDepthForEstimatedBook(true, runtime.Instrument.ToPriceTicks(level.Price),
-                        runtime.Instrument.ToQuantityUnits(level.Quantity), depthDecoder.LastBookUpdateId);
+                {
+                    runtime.ObserveDepthForEstimatedBook(
+                        true,
+                        runtime.Instrument.ToPriceTicks(level.Price),
+                        runtime.Instrument.ToQuantityUnits(level.Quantity),
+                        depthDecoder.LastBookUpdateId);
+                }
             }
 
             for (int i = 0; i < askCount && !runtime.OrderBook.IsSynchronized; i++)
             {
                 DepthLevel level = askChanges[i];
                 if (level.Price > 0 && level.Quantity > 0)
-                    runtime.ObserveDepthForEstimatedBook(false, runtime.Instrument.ToPriceTicks(level.Price),
-                        runtime.Instrument.ToQuantityUnits(level.Quantity), depthDecoder.LastBookUpdateId);
+                {
+                    runtime.ObserveDepthForEstimatedBook(
+                        false,
+                        runtime.Instrument.ToPriceTicks(level.Price),
+                        runtime.Instrument.ToQuantityUnits(level.Quantity),
+                        depthDecoder.LastBookUpdateId);
+                }
             }
         }
+    }
 
+    private void ApplyDepthUpdate(InstrumentRuntime? runtime, int bidCount, int askCount)
+    {
         bool wasSynchronized = runtime?.OrderBook.IsSynchronized ?? false;
         long bookStart = Benchmark is null ? 0 : Stopwatch.GetTimestamp();
         if (runtime is not null && runtime.BeginDepth(depthDecoder.FirstBookUpdateId, depthDecoder.LastBookUpdateId))
         {
-            bool valid = true;
-            for (int i = 0; i < bidCount && valid; i++)
-            {
-                DepthLevel level = bidChanges[i];
-                long price = runtime.Instrument.ToPriceTicks(level.Price);
-                long quantity = runtime.Instrument.ToQuantityUnits(level.Quantity);
-                valid = runtime.Instrument.Price(price) == level.Price &&
-                        runtime.Instrument.Quantity(quantity) == level.Quantity &&
-                        runtime.ApplyBid(price, quantity);
-            }
-
-            for (int i = 0; i < askCount && valid; i++)
-            {
-                DepthLevel level = askChanges[i];
-                long price = runtime.Instrument.ToPriceTicks(level.Price);
-                long quantity = runtime.Instrument.ToQuantityUnits(level.Quantity);
-                valid = runtime.Instrument.Price(price) == level.Price &&
-                        runtime.Instrument.Quantity(quantity) == level.Quantity &&
-                        runtime.ApplyAsk(price, quantity);
-            }
-
-            if (!valid) runtime.Invalidate();
-            Benchmark?.AddBook(Stopwatch.GetTimestamp() - bookStart);
-            QuoteDecision decision =
-                valid ? runtime.EndDepth(checked(depthDecoder.EventTime * 1_000)) : runtime.Evaluate();
-            if (valid) Benchmark?.AddSignalAndQuote(runtime.LastSignalTicks, runtime.LastQuoteTicks);
-            EmitDecision(runtime, decision);
-            if (runtime.SignalMemory.Faulted && !IsReplay)
-                throw new IOException(
-                    $"Signal history exhausted for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
-            if (!runtime.OrderBook.IsSynchronized && !IsReplay)
-                throw new IOException(
-                    $"Depth coverage lost for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
+            bool valid = ApplyDepthLevels(runtime, bidCount, askCount);
+            CompleteDepthUpdate(runtime, valid, bookStart);
         }
         else if (runtime is not null && wasSynchronized && !runtime.OrderBook.IsSynchronized)
         {
             Benchmark?.AddBook(Stopwatch.GetTimestamp() - bookStart);
             EmitDecision(runtime, runtime.Evaluate());
             if (!IsReplay)
+            {
                 throw new IOException(
                     $"Depth sequence gap for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
+            }
+        }
+    }
+
+    private static bool ApplyDepthLevel(InstrumentRuntime runtime, DepthLevel level, bool bid)
+    {
+        long price = runtime.Instrument.ToPriceTicks(level.Price);
+        long quantity = runtime.Instrument.ToQuantityUnits(level.Quantity);
+        return runtime.Instrument.Price(price) == level.Price &&
+            runtime.Instrument.Quantity(quantity) == level.Quantity && (bid ? runtime.ApplyBid(price,
+            quantity) : runtime.ApplyAsk(price, quantity));
+    }
+
+    private bool ApplyDepthLevels(InstrumentRuntime runtime, int bidCount, int askCount)
+    {
+        bool valid = true;
+        for (int i = 0; i < bidCount && valid; i++)
+        {
+            valid = ApplyDepthLevel(runtime, bidChanges[i], true);
         }
 
-        if (!logEvents) return;
-        string symbol = Encoding.UTF8.GetString(symbolBytes[..symbolLength]);
-        Console.WriteLine(
-            $"DEPTH {symbol} " +
-            $"{depthDecoder.FirstBookUpdateId}" +
-            $"->{depthDecoder.LastBookUpdateId} " +
-            $"bids={bidCount} " +
-            $"asks={askCount}");
+        for (int i = 0; i < askCount && valid; i++)
+        {
+            valid = ApplyDepthLevel(runtime, askChanges[i], false);
+        }
+
+        return valid;
+    }
+
+    private void CompleteDepthUpdate(InstrumentRuntime runtime, bool valid, long bookStart)
+    {
+        if (!valid)
+        {
+            runtime.Invalidate();
+        }
+
+        Benchmark?.AddBook(Stopwatch.GetTimestamp() - bookStart);
+        QuoteDecision decision = valid ? runtime.EndDepth(checked(depthDecoder.EventTime * 1_000)) : runtime.Evaluate();
+        if (valid)
+        {
+            Benchmark?.AddSignalAndQuote(runtime.LastSignalTicks, runtime.LastQuoteTicks);
+        }
+
+        EmitDecision(runtime, decision);
+        if (runtime.SignalMemory.Faulted && !IsReplay)
+        {
+            throw new IOException(
+                $"Signal history exhausted for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
+        }
+
+        if (!runtime.OrderBook.IsSynchronized && !IsReplay)
+        {
+            throw new IOException(
+                $"Depth coverage lost for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
+        }
+    }
+
+    private void LogDepthChanges(ReadOnlySpan<byte> symbolBytes, int bidCount, int askCount)
+    {
+        if (!logEvents)
+        {
+            return;
+        }
+
+        string symbol = Encoding.UTF8.GetString(symbolBytes);
+        Console.WriteLine($"DEPTH {symbol} " + $"{depthDecoder.FirstBookUpdateId}" +
+            $"->{depthDecoder.LastBookUpdateId} " + $"bids={bidCount} " + $"asks={askCount}");
         for (int i = 0; i < bidCount; i++)
         {
             DepthLevel bid = bidChanges[i];
-            Console.WriteLine(
-                $"  BID CHANGE price={bid.Price} qty={bid.Quantity}");
+            Console.WriteLine($"  BID CHANGE price={bid.Price} qty={bid.Quantity}");
         }
 
         for (int i = 0; i < askCount; i++)
         {
             DepthLevel ask = askChanges[i];
-            Console.WriteLine(
-                $"  ASK CHANGE price={ask.Price} qty={ask.Quantity}");
+            Console.WriteLine($"  ASK CHANGE price={ask.Price} qty={ask.Quantity}");
         }
     }
 
@@ -449,17 +572,34 @@ public sealed class BinanceFeedReader
         while (group.HasNext)
         {
             var trade = group.Next();
-            if (count == tradeQuantities.Length) return;
+            if (count == tradeQuantities.Length)
+            {
+                return;
+            }
+
             tradeQuantities[count] = DecodeDecimal(trade.Qty, tradesDecoder.QtyExponent);
             tradeAggressors[count++] = trade.IsBuyerMaker == BoolEnum.False;
         }
 
-        if (tradesDecoder.SymbolLength() > 64) return;
+        if (tradesDecoder.SymbolLength() > 64)
+        {
+            return;
+        }
+
         Span<byte> symbol = stackalloc byte[64];
         int length = tradesDecoder.GetSymbol(symbol);
         InstrumentRuntime? runtime = FindRuntime(symbol[..length]);
         Benchmark?.AddDecode(Stopwatch.GetTimestamp() - decodeStart);
-        if (runtime is null) return;
+        if (runtime is null)
+        {
+            return;
+        }
+
+        ApplyTrades(runtime, count);
+    }
+
+    private void ApplyTrades(InstrumentRuntime runtime, int count)
+    {
         long timeNs = checked(tradesDecoder.EventTime * 1_000);
         for (int i = 0; i < count; i++)
         {
@@ -474,8 +614,10 @@ public sealed class BinanceFeedReader
             Benchmark?.AddSignalAndQuote(runtime.LastSignalTicks, runtime.LastQuoteTicks);
             EmitDecision(runtime, decision);
             if (runtime.SignalMemory.Faulted && !IsReplay)
+            {
                 throw new IOException(
                     $"Trade history exhausted for {runtime.Instrument.Symbol}; reconnect and reload snapshot.");
+            }
         }
     }
 
@@ -488,96 +630,142 @@ public sealed class BinanceFeedReader
     private InstrumentRuntime? FindRuntime(ReadOnlySpan<byte> symbol)
     {
         for (int i = 0; i < runtimeSymbols.Length; i++)
+        {
             if (symbol.SequenceEqual(runtimeSymbols[i]))
+            {
                 return runtimes[i];
+            }
+        }
+
         return null;
     }
 
     private static bool ValidFrame(ReadOnlySpan<byte> frame)
     {
-        if (frame.Length < 8) return false;
+        if (frame.Length < 8)
+        {
+            return false;
+        }
+
         int block = BinaryPrimitives.ReadUInt16LittleEndian(frame);
         int template = BinaryPrimitives.ReadUInt16LittleEndian(frame[2..]);
         int schema = BinaryPrimitives.ReadUInt16LittleEndian(frame[4..]);
         int version = BinaryPrimitives.ReadUInt16LittleEndian(frame[6..]);
-        if (schema != 1 || version != 0 || frame.Length < 8 + block + 1) return false;
+        if (schema != 1 || version != 0 || frame.Length < 8 + block + 1)
+        {
+            return false;
+        }
+
         int offset = 8 + block;
-        if (template == BestBidAskStreamEvent.TemplateId)
+        if (!SkipFrameGroups(frame, template, block, ref offset))
         {
-            if (block < BestBidAskStreamEvent.BlockLength) return false;
+            return false;
         }
-        else if (template == DepthDiffStreamEvent.TemplateId)
-        {
-            if (block < DepthDiffStreamEvent.BlockLength) return false;
-            for (int i = 0; i < 2; i++)
-            {
-                if (frame.Length - offset < 4) return false;
-                int groupBlock = BinaryPrimitives.ReadUInt16LittleEndian(frame[offset..]);
-                int count = BinaryPrimitives.ReadUInt16LittleEndian(frame[(offset + 2)..]);
-                if (groupBlock < 16 || count > 5_000) return false;
-                offset += 4;
-                if ((long)groupBlock * count > frame.Length - offset) return false;
-                offset += groupBlock * count;
-            }
-        }
-        else if (template == TradesStreamEvent.TemplateId)
-        {
-            if (block < TradesStreamEvent.BlockLength || frame.Length - offset < 6) return false;
-            int groupBlock = BinaryPrimitives.ReadUInt16LittleEndian(frame[offset..]);
-            uint count = BinaryPrimitives.ReadUInt32LittleEndian(frame[(offset + 2)..]);
-            if (groupBlock < 25 || count > 8_192) return false;
-            offset += 6;
-            if ((long)groupBlock * count > frame.Length - offset) return false;
-            offset += groupBlock * (int)count;
-        }
-        else return false;
 
         return offset < frame.Length && offset + 1 + frame[offset] == frame.Length;
     }
 
-    private static string FormatStreams(string[]? symbolsToFormat) => string.Join(
-        "/",
-        symbolsToFormat?.SelectMany(symbol =>
+    private static bool SkipFrameGroups(ReadOnlySpan<byte> frame, int template, int block, ref int offset)
+    {
+        if (template == BestBidAskStreamEvent.TemplateId)
         {
-            string name = symbol.ToLowerInvariant();
+            return block >= BestBidAskStreamEvent.BlockLength;
+        }
 
-            return new[]
+        if (template == DepthDiffStreamEvent.TemplateId)
+        {
+            return block >= DepthDiffStreamEvent.BlockLength && SkipDepthGroups(frame, ref offset);
+        }
+
+        if (template == TradesStreamEvent.TemplateId)
+        {
+            return block >= TradesStreamEvent.BlockLength && frame.Length - offset >= 6 && SkipTradeGroup(frame,
+                ref offset);
+        }
+
+        return false;
+    }
+
+    private static bool SkipDepthGroups(ReadOnlySpan<byte> frame, ref int offset)
+    {
+        for (int i = 0; i < 2; i++)
+        {
+            if (frame.Length - offset < 4)
             {
-                $"{name}@depth",
-                $"{name}@bestBidAsk",
-                $"{name}@trade"
-            };
-        }) ?? []);
+                return false;
+            }
 
-    private static decimal DecodeDecimal(
-        long mantissa,
-        sbyte exponent)
+            int groupBlock = BinaryPrimitives.ReadUInt16LittleEndian(frame[offset..]);
+            int count = BinaryPrimitives.ReadUInt16LittleEndian(frame[(offset + 2)..]);
+            if (groupBlock < 16 || count > 5_000)
+            {
+                return false;
+            }
+
+            offset += 4;
+            if ((long)groupBlock * count > frame.Length - offset)
+            {
+                return false;
+            }
+
+            offset += groupBlock * count;
+        }
+
+        return true;
+    }
+
+    private static bool SkipTradeGroup(ReadOnlySpan<byte> frame, ref int offset)
+    {
+        int groupBlock = BinaryPrimitives.ReadUInt16LittleEndian(frame[offset..]);
+        uint count = BinaryPrimitives.ReadUInt32LittleEndian(frame[(offset + 2)..]);
+        if (groupBlock < 25 || count > 8_192)
+        {
+            return false;
+        }
+
+        offset += 6;
+        if ((long)groupBlock * count > frame.Length - offset)
+        {
+            return false;
+        }
+
+        offset += groupBlock * (int)count;
+        return true;
+    }
+
+    private static string FormatStreams(string[]? symbolsToFormat) => string.Join("/",
+        symbolsToFormat?.SelectMany(StreamsForSymbol) ?? []);
+
+    private static string[] StreamsForSymbol(string symbol)
+    {
+        string name = symbol.ToLowerInvariant();
+        return[$"{name}@depth", $"{name}@bestBidAsk", $"{name}@trade"];
+    }
+
+    private static decimal DecodeDecimal(long mantissa, sbyte exponent)
     {
         decimal value = mantissa;
         if (exponent > 0)
         {
             for (int i = 0; i < exponent; i++)
+            {
                 value *= 10m;
+            }
         }
         else
         {
             for (int i = 0; i < -exponent; i++)
+            {
                 value /= 10m;
+            }
         }
 
         return value;
     }
 
-    public readonly record struct WsMessage(
-        WebSocketMessageType Type,
-        byte[] Payload,
-        int Length,
+    public readonly record struct WsMessage(WebSocketMessageType Type, byte[] Payload, int Length,
         long ReceivedTimestamp = 0);
 
-    public readonly record struct RecordedMessage(
-        Guid RecordingId,
-        long SequenceNumber,
-        long ElapsedNanoseconds,
-        short MessageType,
-        byte[] Payload);
+    public readonly record struct RecordedMessage(Guid RecordingId, long SequenceNumber, long ElapsedNanoseconds,
+        short MessageType, byte[] Payload);
 }
